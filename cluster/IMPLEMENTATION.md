@@ -1,4 +1,4 @@
-# Cluster RL implementation
+# Cluster RL implementation (validation at 4e41f28)
 
 Approved plan: 10 manipulation tasks × state/rgb/map, seed 0, official state
 training budgets; uniform native physics; Mac orchestration and bounded agent
@@ -29,3 +29,12 @@ training budgets; sustained 128-environment RGB memory/throughput was not measur
 The Mac has no Docker; the image has not been built/pushed. The temporary GPU pod
 uses the same pinned setup script as the Dockerfile. Production submission always
 reruns the GPU suite inside the supplied image before unlocking the 30 training Jobs.
+
+## Contact geometry update
+
+Map observations now use robot-frame normals, episode-fixed isotropic bounds and
+7D contact encoding; cache version 3 and `contact_robot_v1` metadata reject old map runs.
+Normalized epsilon is a numerical guard only, not an MLP feature. Before the user
+waived further validation, 30 Mac operational tests and 16 lightweight tests plus
+11 subtests passed. The new geometry/GPU suites were not run; the pending dedicated
+validation pod was deleted. Earlier GPU results above apply to 4e41f28, not this update.

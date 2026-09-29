@@ -7,6 +7,8 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+from benchmark.common.geometry import validate_geometry
+
 
 def network_factory(mode, settings, bank=None):
     import jax.numpy as jnp
@@ -121,17 +123,18 @@ def resolve_map_caches(root, metadata):
 
 
 def load_policy(run_directory):
-    import jax
-    from brax.training import types
-    from brax.training.acme import running_statistics
-    from brax.training.agents.ppo import networks as ppo_networks
-
     root = Path(run_directory).expanduser().resolve()
     if not root.is_dir():
         raise ValueError("--checkpoint must be a Playground run directory (legacy .pt files are unsupported)")
     metadata = json.loads((root / "config.json").read_text())
     if metadata.get("format_version") not in (2, 3):
         raise ValueError("Unsupported checkpoint format; retrain with MuJoCo Playground")
+    validate_geometry(metadata['env_config'])
+    import jax
+    from brax.training import types
+    from brax.training.acme import running_statistics
+    from brax.training.agents.ppo import networks as ppo_networks
+
     metadata = resolve_map_caches(root, metadata)
     checkpoint_path, params = latest_checkpoint(root)
     bank = None

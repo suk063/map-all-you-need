@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from benchmark.common.geometry import geometry_config
+
 
 class RunArtifactsTest(unittest.TestCase):
     def test_checkpoint_selection_skips_temporary_and_broken_directories(self):
@@ -40,7 +42,8 @@ class RunArtifactsTest(unittest.TestCase):
 
     def test_map_policy_keeps_checkpoint_path_after_loading_feature_caches(self):
         from benchmark.common import policy
-        saved = {'format_version': 2, 'env_config': {'obs_mode': 'map', 'map': {'cache': '/old'}},
+        saved = {'format_version': 3, 'env_config': {'env_id': 'PandaPickCube', 'obs_mode': 'map',
+                 'map_geometry': geometry_config('PandaPickCube'), 'map': {'cache': '/old'}},
                  'map_cache_paths': ['/old/a.h5', '/old/b.h5'], 'observation_size': {'xyz': [6], 'feature_ids': [2]},
                  'action_size': 3, 'ppo': {'network_factory': {}, 'normalize_observations': False}}
         inference = object()
@@ -93,6 +96,7 @@ class RunArtifactsTest(unittest.TestCase):
         from benchmark.rl.resume import validate_resume_overrides
         saved = {'seed': 3, 'target_timesteps': 1000,
                  'env_config': {'env_id': 'PandaPickCube', 'obs_mode': 'map', 'environment': {'impl': 'warp'},
+                                'map_geometry': geometry_config('PandaPickCube'),
                                 'map': {'robot': 'full', 'background': False, 'views': 96, 'extra_views': 512,
                                         'cache': '/old/cache', 'dino': {'source': '/old/dino', 'weights': '/old/weights'}}}}
         validate_resume_overrides(Namespace(), saved)
@@ -101,6 +105,21 @@ class RunArtifactsTest(unittest.TestCase):
                        {'map_robot': 'gripper'}, {'map_views': 4}, {'total_timesteps': 1200}):
             with self.subTest(values=values), self.assertRaisesRegex(ValueError, 'incompatible'):
                 validate_resume_overrides(Namespace(**values), saved)
+
+    def test_legacy_map_is_rejected_before_checkpoint_loading_or_resume_completion(self):
+        from argparse import Namespace
+
+        from benchmark.common.policy import load_policy
+        from benchmark.rl.resume import validate_resume_overrides
+        saved = {'format_version': 3, 'target_timesteps': 8, 'env_config':
+                 {'env_id': 'PandaPickCube', 'obs_mode': 'map'}}
+        with self.assertRaisesRegex(ValueError, 'retrain with contact_robot_v1'):
+            validate_resume_overrides(Namespace(), saved)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'config.json').write_text(json.dumps(saved))
+            with patch('benchmark.common.policy.latest_checkpoint', side_effect=AssertionError('Too late')), \
+                    self.assertRaisesRegex(ValueError, 'retrain with contact_robot_v1'):
+                load_policy(directory)
 
     def test_checkpoint_cadence_does_not_multiply_large_native_batches(self):
         from benchmark.rl.resume import checkpoint_schedule

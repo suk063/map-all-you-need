@@ -74,17 +74,34 @@ def knn(xyz, centers, valid, k):
     return jax.lax.map(neighbors, centers.swapaxes(0, 1), batch_size=32).swapaxes(0, 1)
 
 
+def contact_features(delta, normal_i, normal_j, epsilon):
+    """Seven geometric channels; epsilon is only a numerical guard, never a feature."""
+    squared = jnp.sum(delta * delta, axis=-1, keepdims=True)
+    # Keep both branches finite, including derivatives at duplicate/self pairs.
+    safe_distance = jnp.sqrt(jnp.where(squared > 0, squared, 1))
+    distance = jnp.where(squared > 0, safe_distance, 0)
+    direction = jnp.where(squared > epsilon * epsilon, delta / safe_distance, 0)
+
+    def dot(a, b):
+        return jnp.clip(jnp.sum(a * b, axis=-1, keepdims=True), -1, 1)
+
+    return jnp.concatenate((delta, distance, dot(normal_i, normal_j),
+                            dot(normal_i, direction), dot(normal_j, direction)), axis=-1)
+
+
 class PointBlock(nn.Module):
     width: int
     neighbors: int = 16
 
     @nn.compact
-    def __call__(self, xyz, features, valid):
+    def __call__(self, xyz, normals, features, valid, epsilon):
         x = Dense(self.width, use_bias=False, name="before_dense")(features)
         x = nn.relu(nn.RMSNorm(epsilon=1e-6, name="before_norm")(x))
         q, k, v = jnp.split(Dense(3 * self.width, name="qkv")(x), 3, axis=-1)
         ids = knn(xyz, xyz, valid, self.neighbors)
-        delta = Dense(self.width, name="position_in")(gather(xyz, ids) - xyz[:, :, None])
+        edges = contact_features(gather(xyz, ids) - xyz[:, :, None],
+                                 normals[:, :, None], gather(normals, ids), epsilon)
+        delta = Dense(self.width, name="position_in")(edges)
         delta = nn.relu(nn.RMSNorm(epsilon=1e-6, name="position_norm")(delta))
         delta = Dense(self.width, name="position_out")(delta)
         scores = nn.relu(nn.RMSNorm(epsilon=1e-6, name="weight_norm1")(gather(k, ids) - q[:, :, None] + delta))
@@ -106,7 +123,7 @@ class TransitionDown(nn.Module):
     limit: int
 
     @nn.compact
-    def __call__(self, xyz, features, valid):
+    def __call__(self, xyz, normals, features, valid):
         selected, mask = fps(xyz, valid, self.limit)
         centers = gather(xyz, selected)
         ids = knn(xyz, centers, valid, 16)
@@ -114,7 +131,7 @@ class TransitionDown(nn.Module):
         x = Dense(self.width, use_bias=False)(jnp.concatenate((relative, gather(features, ids)), axis=-1))
         x = nn.relu(nn.RMSNorm(epsilon=1e-6)(x))
         x = jnp.where(gather(valid, ids)[..., None], x, -jnp.finfo(x.dtype).max).max(2)
-        return centers, x * mask[..., None], mask
+        return centers, gather(normals, selected), x * mask[..., None], mask
 
 
 class MapEncoder(nn.Module):
@@ -124,14 +141,16 @@ class MapEncoder(nn.Module):
         batch_shape, count = ids.shape[:-1], ids.shape[-1]
         ids = ids.reshape(-1, count)
         xyz = obs["xyz"].reshape(-1, count, 3)
+        normals = obs['normals'].reshape(-1, count, 3)
+        epsilon = obs['geometry_epsilon'].reshape(-1, 1, 1, 1)
         valid = ids >= 0
         # Project the immutable bank before gathering, avoiding B*N*1024 storage.
         projected = Dense(64, name="input")(jax.lax.stop_gradient(bank))
         x = projected[jnp.maximum(ids, 0)]
         for i, (width, limit) in enumerate(((64, 256), (128, 64))):
-            xyz, x, valid = TransitionDown(width, limit, name=f"down_{i}")(xyz, x, valid)
-            x = PointBlock(width, name=f"block_{i}")(xyz, x, valid)
-        x = PointBlock(128, neighbors=64, name="global_block")(xyz, x, valid)
+            xyz, normals, x, valid = TransitionDown(width, limit, name=f"down_{i}")(xyz, normals, x, valid)
+            x = PointBlock(width, name=f"block_{i}")(xyz, normals, x, valid, epsilon)
+        x = PointBlock(128, neighbors=64, name="global_block")(xyz, normals, x, valid, epsilon)
         scores = Dense(1, name="score")(x).squeeze(-1)
         scores = jnp.where(valid, scores, -jnp.finfo(scores.dtype).max)
         pooled = (x * jax.nn.softmax(scores, axis=1)[..., None]).sum(1)

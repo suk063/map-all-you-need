@@ -17,8 +17,9 @@ from mujoco.mjx._src.math import quat_to_mat
 from mujoco_playground._src.wrapper import Wrapper
 
 from benchmark.common.envs import GOAL_BODIES, GOAL_TASKS
+from benchmark.common.geometry import EPSILON_M, geometry_config, scene_bounds
 
-MAP_VERSION = 2
+MAP_VERSION = 3
 IMAGE_SIZE = 256
 # Explicit robot roots keep static scene furniture out of the observation.
 ROBOT_ROOTS = {
@@ -309,6 +310,7 @@ def build_template(model, geoms, mesh, config, destination, net, device, tableto
     with h5py.File(temporary, "w") as f:
         f.attrs.update(format_version=MAP_VERSION, metadata=json.dumps(report))
         f.create_dataset("xyz", data=xyz[keep].astype(np.float32))
+        f.create_dataset("normals", data=normals[keep].astype(np.float32))
         f.create_dataset("features", data=(sums[keep] / counts[keep, None]).astype(np.float16), compression="gzip")
         f.create_dataset("counts", data=counts[keep])
     temporary.replace(destination)
@@ -326,13 +328,17 @@ class FeatureBank:
             with h5py.File(path) as f:
                 if f.attrs.get("format_version") != MAP_VERSION:
                     raise ValueError(f"Incompatible map cache: {path}")
-                xyz, features = f["xyz"][:], f["features"][:]
-            if xyz.shape != (len(xyz), 3) or not len(xyz) or features.shape != (len(xyz), 1024):
+                if not {'xyz', 'normals', 'features'} <= set(f):
+                    raise ValueError(f'Missing map cache geometry: {path}')
+                xyz, normals, features = f["xyz"][:], f['normals'][:], f["features"][:]
+            if xyz.shape != (len(xyz), 3) or not len(xyz) or normals.shape != xyz.shape or features.shape != (len(xyz), 1024):
                 raise ValueError(f"Invalid map cache shapes: {path}")
-            if not np.isfinite(features).all() or not np.isfinite(xyz).all():
+            if not np.isfinite(features).all() or not np.isfinite(xyz).all() or not np.isfinite(normals).all():
                 raise ValueError(f"Nonfinite map cache: {path}")
+            if not np.allclose(np.linalg.norm(normals, axis=-1), 1, atol=1e-4, rtol=1e-4):
+                raise ValueError(f'Nonunit map normals: {path}')
             ids = np.arange(self.size, self.size + len(xyz), dtype=np.int32)
-            self.templates[path] = (xyz, ids)
+            self.templates[path] = (xyz, normals, ids)
             self.arrays.append(features)
             self.paths.append(path)
             self.size += len(xyz)
@@ -347,7 +353,10 @@ class MapObservationWrapper(Wrapper):
     def __init__(self, env, env_id, config):
         super().__init__(env)
         self.bank = FeatureBank()
-        local, ids, bodies = [], [], []
+        local, normals, ids, bodies = [], [], [], []
+        frame = geometry_config(env_id)['frame']
+        self.frame_bodies = jnp.asarray([env.mj_model.body(name).id for name in frame['origin_bodies']])
+        self.frame_axes = env.mj_model.body(frame['axes_body']).id
         self.component_names = []
         net = None
         try:
@@ -366,8 +375,9 @@ class MapObservationWrapper(Wrapper):
                         with torch.random.fork_rng():
                             net = FrozenDINO(config["dino"]).to(device)
                     build_template(env.mj_model, geoms, mesh, config, path, net, device, table)
-                xyz, features = self.bank.add(path)
+                xyz, normal, features = self.bank.add(path)
                 local.append(xyz)
+                normals.append(normal)
                 ids.append(features)
                 bodies.extend([body] * len(xyz))
                 name = env.mj_model.body(body).name
@@ -380,6 +390,7 @@ class MapObservationWrapper(Wrapper):
                 del net
                 torch.cuda.empty_cache()
         self.local = jnp.asarray(np.concatenate(local))
+        self.local_normals = jnp.asarray(np.concatenate(normals))
         self.feature_ids = jnp.asarray(np.concatenate(ids))
         self.body_ids = jnp.asarray(bodies)
         mocap_ids = env.mj_model.body_mocapid[np.asarray(bodies)]
@@ -389,9 +400,9 @@ class MapObservationWrapper(Wrapper):
     @property
     def observation_size(self):
         n = len(self.feature_ids)
-        return {"xyz": (n * 3,), "feature_ids": (n,)}
+        return {"xyz": (n * 3,), 'normals': (n * 3,), "feature_ids": (n,), 'geometry_epsilon': (1,)}
 
-    def observation(self, data):
+    def geometry(self, data):
         rotation = data.xmat[self.body_ids]
         position = data.xpos[self.body_ids]
         if self.mocap_points.size:
@@ -400,15 +411,28 @@ class MapObservationWrapper(Wrapper):
             rotation = rotation.at[self.mocap_points].set(jax.vmap(quat_to_mat)(data.mocap_quat[self.mocap_ids]))
             position = position.at[self.mocap_points].set(data.mocap_pos[self.mocap_ids])
         xyz = jnp.einsum("nij,nj->ni", rotation, self.local) + position
+        normals = jnp.einsum('nij,nj->ni', rotation, self.local_normals)
+        origin = data.xpos[self.frame_bodies].mean(axis=0)
+        axes = data.xmat[self.frame_axes]
+        # Row vectors: multiplying by R is the column-vector R^T transform.
+        return (xyz - origin) @ axes, normals @ axes
+
+    def observation(self, data, info):
+        xyz, normals = self.geometry(data)
+        xyz = (xyz - info['_map_center']) / info['_map_scale']
         # Flat leaves keep Brax's rollout/statistics batch axes consistent.
-        return {"xyz": xyz.reshape(-1), "feature_ids": self.feature_ids}
+        return {"xyz": xyz.reshape(-1), 'normals': normals.reshape(-1), "feature_ids": self.feature_ids,
+                'geometry_epsilon': EPSILON_M / info['_map_scale']}
 
     def _replace_obs(self, state):
-        return state.replace(obs=self.observation(state.data), info={**state.info, "_map_native_obs": state.obs})
+        return state.replace(obs=self.observation(state.data, state.info), info={**state.info, "_map_native_obs": state.obs})
 
     def reset(self, rng):
         state = self.env.reset(rng)
-        state = state.replace(info={**state.info, "_map_first_obs": state.obs, "_map_reset_count": jnp.array(0)})
+        xyz, _ = self.geometry(state.data)
+        center, scale = scene_bounds(xyz, self.feature_ids >= 0)
+        state = state.replace(info={**state.info, "_map_first_obs": state.obs, "_map_reset_count": jnp.array(0),
+                                    '_map_center': center, '_map_scale': scale})
         return self._replace_obs(state)
 
     def step(self, state, action):

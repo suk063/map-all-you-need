@@ -122,7 +122,10 @@ def test_added_camera_preserves_native_model_and_constructor_changes(tmp_path):
 def points():
     rng = np.random.default_rng(1)
     xyz = rng.normal(size=(2, 32, 3)).astype(np.float32)
-    obs = {"xyz": jnp.asarray(xyz.reshape(2, -1)), "feature_ids": jnp.tile(jnp.arange(32), (2, 1))}
+    normals = rng.normal(size=xyz.shape).astype(np.float32)
+    normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
+    obs = {"xyz": jnp.asarray(xyz.reshape(2, -1)), "feature_ids": jnp.tile(jnp.arange(32), (2, 1)),
+           'normals': jnp.asarray(normals.reshape(2, -1)), 'geometry_epsilon': jnp.full((2, 1), 1e-6)}
     bank = jnp.asarray(rng.normal(size=(32, 1024)), dtype=jnp.float32)
     net = MapEncoder()
     params = net.init(jax.random.PRNGKey(2), obs, bank)
@@ -134,10 +137,12 @@ def test_point_encoder_invariance_padding_and_gradients(points):
     forward = jax.jit(net.apply)
     output = forward(params, obs, bank)
     assert output.shape == (2, 256)
-    assert sum(x.size for x in jax.tree.leaves(params)) == 342457
+    for block in ('block_0', 'block_1', 'global_block'):
+        assert params['params'][block]['position_in']['kernel'].shape[0] == 7
     translated = {**obs, "xyz": (obs["xyz"].reshape(2, 32, 3) + jnp.array([1., 2., -.5])).reshape(2, -1)}
     np.testing.assert_allclose(forward(params, translated, bank), output, atol=2e-5, rtol=2e-5)
-    padded = {"xyz": jnp.pad(obs["xyz"].reshape(2, 32, 3), ((0, 0), (0, 5), (0, 0))).reshape(2, -1),
+    padded = {**obs, "xyz": jnp.pad(obs["xyz"].reshape(2, 32, 3), ((0, 0), (0, 5), (0, 0))).reshape(2, -1),
+              'normals': jnp.pad(obs['normals'].reshape(2, 32, 3), ((0, 0), (0, 5), (0, 0))).reshape(2, -1),
               "feature_ids": jnp.pad(obs["feature_ids"], ((0, 0), (0, 5)), constant_values=-1)}
     np.testing.assert_allclose(forward(params, padded, bank), output, atol=2e-5, rtol=2e-5)
     grad = jax.jit(jax.grad(lambda p: jnp.square(net.apply(p, obs, bank)).mean()))(params)
@@ -235,6 +240,7 @@ def test_feature_bank_validation_and_reuse(tmp_path):
     with h5py.File(path, "w") as f:
         f.attrs["format_version"] = MAP_VERSION
         f["xyz"] = np.zeros((2, 3), np.float32)
+        f['normals'] = np.tile([0., 0., 1.], (2, 1)).astype(np.float32)
         f["features"] = np.ones((2, 1024), np.float16)
     bank = FeatureBank()
     a = bank.add(path)
@@ -242,7 +248,7 @@ def test_feature_bank_validation_and_reuse(tmp_path):
     assert a is b and bank.size == 2
     assert bank.features.shape == (2, 1024)
     with h5py.File(path, "a") as f:
-        f.attrs["format_version"] = 1
+        f.attrs["format_version"] = 2
     with pytest.raises(ValueError, match="Incompatible"):
         FeatureBank().add(path)
 
@@ -262,6 +268,8 @@ def test_articulated_parts_follow_forward_kinematics():
     mapper.local = jnp.array([[0, 0, 0], [.1, 0, 0], [.02, .01, 0]])
     mapper.body_ids = jnp.array([1, 2, 3])
     mapper.feature_ids = jnp.arange(3)
+    mapper.local_normals = jnp.tile(jnp.array([1., 0, 0]), (3, 1))
+    mapper.frame_bodies, mapper.frame_axes = jnp.array([0]), 0
     mapper.mocap_points = jnp.array([], dtype=jnp.int32)
     data = mujoco.MjData(model)
     for qpos, expected in (
@@ -271,7 +279,7 @@ def test_articulated_parts_follow_forward_kinematics():
         data.qpos[:] = qpos
         mujoco.mj_forward(model, data)
         poses = SimpleNamespace(xmat=jnp.asarray(data.xmat.reshape(-1, 3, 3)), xpos=jnp.asarray(data.xpos))
-        out = mapper.observation(poses)["xyz"].reshape(-1, 3)
+        out, _ = mapper.geometry(poses)
         np.testing.assert_allclose(out, expected, atol=1e-6)
 
 
@@ -286,16 +294,18 @@ def test_goal_map_uses_current_mocap_pose_without_advancing_physics():
     mapper.local = jnp.array([[.02, 0, 0], [.02, 0, 0], [0, .03, 0]])
     mapper.body_ids = jnp.array([1, 2, 2])
     mapper.feature_ids = jnp.arange(3)
+    mapper.local_normals = jnp.tile(jnp.array([1., 0, 0]), (3, 1))
+    mapper.frame_bodies, mapper.frame_axes = jnp.array([0]), 0
     mapper.mocap_points = jnp.array([1, 2])
     mapper.mocap_ids = jnp.array([0, 0])
     # A native task can change mocap after stepping, leaving body transforms stale.
     poses = SimpleNamespace(xpos=jnp.asarray(data.xpos), xmat=jnp.asarray(data.xmat.reshape(-1, 3, 3)),
                             mocap_pos=jnp.array([[1., 2., 3.]]),
                             mocap_quat=jnp.array([[np.sqrt(.5), 0, 0, np.sqrt(.5)]]))
-    xyz = mapper.observation(poses)['xyz'].reshape(-1, 3)
+    xyz, normals = mapper.geometry(poses)
     np.testing.assert_allclose(xyz, [[.02, 0, 0], [1, 2.02, 3], [.97, 2, 3]], atol=1e-6)
     np.testing.assert_array_equal(poses.xpos, data.xpos)
-    np.testing.assert_array_equal(mapper.observation(poses)['feature_ids'], [0, 1, 2])
+    np.testing.assert_allclose(normals, [[1, 0, 0], [0, 1, 0], [0, 1, 0]], atol=1e-6)
 
 
 @pytest.mark.integration

@@ -71,6 +71,7 @@ def test_task_native_and_map_physics(task, monkeypatch):
         np.testing.assert_array_equal(getattr(base.mj_model, name), value)
     assert len(mapper.feature_ids) > 0
     assert np.isfinite(mapper.local).all()
+    np.testing.assert_allclose(np.linalg.norm(mapper.local_normals, axis=-1), 1, atol=1e-5)
     assert not any(name.startswith("world/") for name in mapper.component_names) or task.startswith("Aloha")
     expected_goal = (set() if task in ('AlohaSinglePegInsertion', 'LeapCubeRotateZAxis', 'AeroCubeRotateZAxis')
                      else {'goal' if task == 'LeapCubeReorient' else 'mocap_target'})
@@ -88,6 +89,8 @@ def test_task_native_and_map_physics(task, monkeypatch):
     keys = jax.random.split(jax.random.PRNGKey(13), 2)
     a = jax.jit(raw.reset)(keys)
     b = jax.jit(mapped.reset)(keys)
+    assert np.abs(b.obs['xyz']).max() <= 1 + 1e-6
+    centers, scales = b.info['_map_center'], b.info['_map_scale']
     np.testing.assert_array_equal(a.data.qpos, b.data.qpos)
     np.testing.assert_array_equal(a.info['rng'], b.info['rng'])
     for name in expected_goal:
@@ -98,6 +101,9 @@ def test_task_native_and_map_physics(task, monkeypatch):
         local = np.asarray(mapper.local)[mask]
         for i in range(2):
             goal_xyz = local @ quat_matrix(np.asarray(a.data.mocap_quat[i, mocap])).T + np.asarray(a.data.mocap_pos[i, mocap])
+            origin = np.asarray(a.data.xpos[i, mapper.frame_bodies]).mean(0)
+            axes = np.asarray(a.data.xmat[i, mapper.frame_axes])
+            goal_xyz = ((goal_xyz - origin) @ axes - centers[i]) / scales[i]
             np.testing.assert_allclose(np.asarray(b.obs['xyz']).reshape(2, -1, 3)[i, mask], goal_xyz, atol=1e-6)
     raw_step, map_step = jax.jit(raw.step), jax.jit(mapped.step)
     action = jnp.full((2, native.action_size), .05)
@@ -111,9 +117,14 @@ def test_task_native_and_map_physics(task, monkeypatch):
             np.testing.assert_allclose(x, y, rtol=1e-5, atol=atol)
         np.testing.assert_array_equal(a.done, b.done)
         np.testing.assert_array_equal(a.info['rng'], b.info['rng'])
-        expected = jax.vmap(mapper.observation)(a.data)
+        expected = jax.vmap(mapper.observation)(b.data, b.info)
         np.testing.assert_allclose(b.obs['xyz'], expected['xyz'], rtol=1e-5, atol=2e-6)
         np.testing.assert_array_equal(b.obs['feature_ids'], expected['feature_ids'])
+        np.testing.assert_allclose(b.obs['normals'], expected['normals'], atol=2e-6)
+        np.testing.assert_allclose(np.linalg.norm(b.obs['normals'].reshape(2, -1, 3), axis=-1), 1, atol=1e-5)
+        np.testing.assert_array_equal(b.info['_map_center'], centers)
+        np.testing.assert_array_equal(b.info['_map_scale'], scales)
+        np.testing.assert_allclose(b.obs['geometry_epsilon'], 1e-6 / scales)
         assert np.isfinite(b.obs['xyz']).all()
     print(f"PASS {task}: {native.action_size} actions, {len(mapper.feature_ids)} map points", flush=True)
 

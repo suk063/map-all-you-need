@@ -101,6 +101,9 @@ Map cache는 `/mnt/map-all-you-need/<run-id>/cache/<task>/seed<seed>/`에 분리
 평가 자체에는 Linux/GPU 학습 의존성이 필요하다.
 
 State/map 기본 설정은 유지한다. 최신 main의 task별 goal 표시 규칙을 세 입력에 공통 적용한다.
+Map은 robot-frame point와 normal, episode별 등방성 정규화를 사용하는 `contact_robot_v1`이다.
+Normal 없는 이전 cache는 새 key로 생성하며 기존 map checkpoint는 평가·resume하지 않는다.
+정규화 epsilon은 수치 처리에만 전달하고 학습 feature에는 포함하지 않는다.
 RGB는 native state 물리와 원본 texture를 사용한 64×64 RGB만 제공하며
 actor/critic 각각 Brax CNN을 사용한다. 기본 env 128, eval env 8, batch 16,
 관측 정규화 비활성화이며 카메라 설정도 checkpoint metadata에 저장한다.

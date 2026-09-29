@@ -33,7 +33,9 @@ def checkpoint_schedule(params, requested_steps):
 
 def validate_resume_overrides(args, metadata):
     """Only explicit identity overrides are checked; absent options inherit."""
+    from benchmark.common.geometry import validate_geometry
     config = metadata["env_config"]
+    validate_geometry(config)
     expected = {"env_id": config["env_id"], "obs_mode": config["obs_mode"], "seed": metadata["seed"],
                 "impl": config["environment"].get("impl"),
                 "total_timesteps": metadata.get("target_timesteps", metadata.get("ppo", {}).get("num_timesteps"))}

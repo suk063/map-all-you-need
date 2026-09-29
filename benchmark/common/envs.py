@@ -11,6 +11,8 @@ from mujoco_playground._src.manipulation.franka_emika_panda.pick_cartesian impor
 from mujoco_playground._src.wrapper import Wrapper
 from mujoco_playground.config import manipulation_params
 
+from benchmark.common.geometry import geometry_config, validate_geometry
+
 TASKS = tuple(manipulation.ALL_ENVS)
 OBS_MODES = ("state", "rgb", "map")
 DEFAULT_TASK = "PandaPickCubeCartesian"
@@ -54,6 +56,8 @@ def env_config(env_id=DEFAULT_TASK, obs_mode="state", impl=None):
     if obs_mode == "rgb":
         from benchmark.common.rgb import rgb_config
         result['rgb'] = rgb_config(env_id)
+    elif obs_mode == 'map':
+        result['map_geometry'] = geometry_config(env_id)
     return result
 
 
@@ -93,6 +97,7 @@ def make_env(config, num_envs=1):
     legacy_hidden = legacy_vision and config['env_id'] == DEFAULT_TASK and config.get('goal_markers') is False
     if config.get("goal_markers") != "task" and not legacy_hidden:
         raise ValueError("Run uses different goal visibility; use its original source or retrain")
+    validate_geometry(config)
     if legacy_vision and config['env_id'] != DEFAULT_TASK:
         raise ValueError(f'Legacy native RGB is supported only by {DEFAULT_TASK}')
     values = config["environment"]

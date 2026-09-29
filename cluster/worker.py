@@ -11,6 +11,7 @@ import time
 import traceback
 from pathlib import Path
 
+from benchmark.common.geometry import validate_geometry
 from cluster.control import write_json
 
 
@@ -27,6 +28,7 @@ def select_resume(paths, spec, latest=None):
         if (meta['env_config']['env_id'], meta['env_config']['obs_mode'], meta['seed']) != (
                 spec['task'], spec['mode'], spec['seed']):
             raise ValueError('Resume attempt belongs to a different experiment')
+        validate_geometry(meta['env_config'])
         try:
             checkpoint, _ = latest(root)
         except ValueError:

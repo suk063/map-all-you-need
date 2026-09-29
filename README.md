@@ -84,7 +84,7 @@ Map은 **정확한 simulator pose와 visual geometry를 사용하는 관측**입
 구성요소별 local frame에서 1.5cm voxel당 한 점을 유지하고, frozen DINOv3 ViT-L/16의
 1024차원 특징을 multiview 평균합니다. 기본 96개 구면 시점과 최대 512개 보충 시점을 사용하며,
 관측되지 않은 점은 제외합니다. 점 수 제한으로 전체 map을 자르지는 않습니다.
-그다음에는 특징을 고정하고 MuJoCo의 forward kinematics로 계산된 body pose로 좌표만 갱신합니다.
+그다음에는 특징을 고정하고 MuJoCo의 forward kinematics로 계산된 body pose로 좌표와 normal을 갱신합니다.
 관절이 있는 로봇과 조작 대상은 body별 local map을 유지하므로 각 part가 독립적으로 움직입니다.
 한 body에 고정된 여러 geom은 같은 part로 취급합니다. Goal marker도 별도의 component로 포함합니다.
 원본이 사용하는 투명도·색상·texture를 유지하고, 현재 mocap 위치·회전을 읽어 map을 갱신합니다.
@@ -126,14 +126,27 @@ Cabinet barrier와 PushCube wall은 reward/종료 판정에 관련되지만 바�
 완전히 투명한 형상은 포함하지 않습니다. 기존 `table|none` map 설정은 지원하지 않습니다.
 
 Cache key에는 MuJoCo 버전, 형상·재질·texture, 추출 설정, DINO 가중치 hash와 소스 revision을 반영합니다.
-캐시에는 coverage도 기록합니다. 기존 SAPIEN 캐시와는 호환되지 않습니다.
+캐시에는 coverage와 body-local 단위 surface normal도 기록합니다. 현재 cache version은 3이며,
+normal이 없는 이전 캐시는 덮어쓰지 않고 새 key로 생성합니다.
+
+Point와 normal은 하나의 robot frame으로 변환합니다. Panda는 `link0`, Leap은 `leap_mount`,
+Aero는 `tetheria_mount`가 기준입니다. Aloha는 양팔 base 위치의 중점을 원점으로 하고
+`left/base_link`의 축을 사용합니다. Robot·물체·goal·배경 모두 같은 frame을 사용합니다.
+매 reset에서 전체 유효 point의 min/max로 중심 `c=(min+max)/2`와
+단일 스케일 `s=max(max(max-min)/2, 1e-6 m)`를 구하고 `xyz=(p_robot-c)/s`로 변환합니다.
+세 축에 같은 스케일을 적용해 방향·각도·거리 비율을 보존합니다. 중심과 스케일은 episode 동안
+고정하고 cached autoreset에서도 초기 관측과 일치하게 유지합니다. `[-1,1]`은 reset에서만
+보장하며, 이후 범위를 벗어나도 clipping하지 않습니다. Normal은 robot-frame 단위벡터입니다.
 
 Point Transformer는 기존 SERF-VLA 기반 구조를 Flax로 이식했습니다.
 DINO projection 1024→64, 두 stage(폭 64/128, 대표점 최대 256/64), 이웃 16개,
 마지막 전체 대표점 attention과 256차원 token 하나를 사용합니다.
-Encoder당 학습 파라미터는 342,457개이며 actor·critic 가중치는 분리합니다.
-절대 좌표를 feature에 붙이지 않고 상대 위치만 사용합니다. 고정 shape와 mask로 padding을 처리하며,
-rollout에는 좌표·특징 ID만 저장합니다. task 내부의 native 관측 history는 환경 내부에 보존합니다.
+Actor·critic 가중치는 분리합니다. Positional MLP는 7D edge feature
+`[d, ||d||, ni·nj, ni·unit(d), nj·unit(d)]`를 받고 attention과 value/message 양쪽에 사용합니다.
+여기서 `d=xyz_j-xyz_i`이며 절대좌표·body ID·정규화 중심·스케일을 학습 feature로 넣지 않습니다.
+고정 shape와 mask로 padding을 처리하며 rollout에는 `xyz`, `normals`, `feature_ids`를 저장합니다.
+보조 관측 `geometry_epsilon=1e-6 m / s`는 영거리·근접 pair의 방향을 안전하게 0으로 만드는
+수치 처리에만 사용하며 MLP feature에는 포함하지 않습니다. Task의 native 관측 history는 내부에 보존합니다.
 
 ## 학습
 
@@ -152,7 +165,8 @@ State는 공식 task별 PPO hyperparameter와 학습량을 기본값으로 사�
 RGB는 동일한 state 학습량과 PPO 설정에 CNN을 결합하고 환경 수 128, 평가 환경 수 8,
 `batch_size=16`, 관측 정규화 비활성화를 적용합니다.
 Map도 해당 task의 state PPO 설정을 사용하되 환경 수 8, 평가 환경 수 8,
-Brax `batch_size=1`, 관측 정규화 비활성화를 적용합니다. 특징 ID·좌표를 정규화하지 않습니다.
+Brax `batch_size=1`, PPO 관측 정규화 비활성화를 적용합니다. 위의 episode별 기하 정규화 외에
+좌표·normal·특징 ID에 running normalization은 적용하지 않습니다.
 Domain randomization은 공식 학습 script의 기본값처럼 별도로 활성화하지 않습니다.
 Task 자체의 초기 상태·관측 노이즈·perturbation 설정은 유지합니다.
 
@@ -204,6 +218,9 @@ Goal 표시 규칙은 `config.json`에 `goal_markers: "task"`로 기록합니다
 관측 조건을 섞지 않도록 당시 소스로 평가하거나 현재 설정으로 새로 학습해야 합니다.
 단, 기존 format-2 Cartesian RGB는 저장된 vision·goal 설정으로 평가하는 호환 경로를 유지합니다.
 기존 실행·cache 파일은 보존하며 변경 없는 component cache는 재사용합니다.
+새 map 실행은 `map_geometry` metadata에 `contact_robot_v1`, frame과 정규화 규칙을 기록합니다.
+이 metadata가 없거나 다른 기존 map checkpoint의 평가·resume은 재학습 안내 오류로 거부합니다.
+기존 state/RGB 호환성은 유지합니다.
 기존 PyTorch `.pt` checkpoint, BC, `rgbd`, 독립 `dino` 모드와
 `--control-mode`, `--view`, `--state-input` 옵션은 지원하지 않습니다.
 
