@@ -126,7 +126,12 @@ def execute(spec):
     log_path = output.parent / (output.name + '.log')
     with log_path.open('a', buffering=1) as log:
         print(json.dumps({'event': 'start', 'kind': spec['kind'], 'output': str(output)}), flush=True)
-        if spec['kind'] == 'validation':
+        if spec['kind'] == 'evaluate':
+            output.mkdir(exist_ok=True)
+            run_command([sys.executable, '-m', 'benchmark.eval', '--checkpoint', spec['checkpoint'],
+                         '--output', str(output / 'eval-seed10000'), '--episodes', str(cfg['eval_episodes']),
+                         '--num-envs', '8', '--seed', '10000'], output, 'evaluate', log)
+        elif spec['kind'] == 'validation':
             output.mkdir(exist_ok=True)
             os.environ['RGB_VALIDATION_OUTPUT'] = str(output / 'rgb-views')
             command = [sys.executable, '-m', 'pytest', '-q', '-m', 'integration']

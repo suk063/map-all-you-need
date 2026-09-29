@@ -17,3 +17,8 @@ The controller only retries terminal Jobs, at most three times, preserves old
 attempts, and continues weights/normalization (not optimizer/RNG) from checkpoints.
 Never propose deleting workloads, editing code, reducing training, or modifying
 other users' resources. Explain the evidence briefly in reason.
+
+Evaluation success must use the versioned success definition and success_once /
+success_final fields. Reward terms are not success probabilities. An absent success
+metric means unmeasured, not failure; reaching the time limit is normal for many
+tasks. Low measured success is a learning outcome, not a retryable operational error.

@@ -54,6 +54,19 @@ class Kube:
         return json.loads(self.run('get', 'jobs,pods', '-l',
             f'app.kubernetes.io/name={APP},mayn-run={run_label(run_id)}', '-o', 'json'))['items']
 
+    def choose_gpu(self, exp):
+        from cluster.gpu import pools
+        nodes = json.loads(self.run('get', 'nodes', '-o', 'json'))['items']
+        pods = json.loads(self.run('get', 'pods', '--all-namespaces', '-o', 'json', timeout=60))['items']
+        quotas = json.loads(self.run('get', 'resourcequota', '-o', 'json'))['items']
+        options = pools(nodes, pods, quotas, self.cfg, exp['mode'])
+        if not options:
+            raise RuntimeError('No accessible GPU pool meets the architecture/VRAM/quota constraints')
+        chosen = max(options, key=lambda p: (p['free'] > 0, p['free'] / (1 + p['backlog']),
+                                            -p['backlog'] / p['capacity']))
+        return {'resource': chosen['resource'], 'products': chosen['products'],
+                'min_memory_mib': self.cfg['gpu_min_memory_mib'][exp['mode']]}
+
     def logs(self, job):
         try:
             return self.run('logs', 'job/' + job, '--all-containers=true', '--tail=250', timeout=40)

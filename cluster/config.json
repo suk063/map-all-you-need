@@ -8,11 +8,13 @@
   "image_pull_secret": "regcred",
   "login_image": "python:3.12-slim-bookworm",
   "gpu_resource": "nvidia.com/rtxa6000",
-  "gpu_products": ["NVIDIA-RTX-A6000"],
+  "gpu_products": [
+    "NVIDIA-RTX-A6000"
+  ],
   "cpu": "8",
   "memory_gi": 32,
   "ephemeral_storage": "16Gi",
-  "parallelism": 4,
+  "parallelism": 30,
   "poll_seconds": 60,
   "stall_seconds": 1800,
   "startup_grace_seconds": 5400,
@@ -21,9 +23,39 @@
   "eval_episodes": 100,
   "dino_source": "/opt/dinov3",
   "dino_weights": "/mnt/dino/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
-  "seeds": [0],
-  "modes": ["state", "rgb", "map"],
-  "tasks": ["AlohaHandOver", "AlohaSinglePegInsertion", "PandaPickCube", "PandaPickCubeOrientation", "PandaPickCubeCartesian", "PandaOpenCabinet", "PandaRobotiqPushCube", "LeapCubeReorient", "LeapCubeRotateZAxis", "AeroCubeRotateZAxis"],
+  "seeds": [
+    0
+  ],
+  "modes": [
+    "state",
+    "rgb",
+    "map"
+  ],
+  "tasks": [
+    "AlohaHandOver",
+    "AlohaSinglePegInsertion",
+    "PandaPickCube",
+    "PandaPickCubeOrientation",
+    "PandaPickCubeCartesian",
+    "PandaOpenCabinet",
+    "PandaRobotiqPushCube",
+    "LeapCubeReorient",
+    "LeapCubeRotateZAxis",
+    "AeroCubeRotateZAxis"
+  ],
   "train_args": [],
-  "excluded_nodes": ["hcc-nrp-shor-c6017.unl.edu", "hcc-chase-shor-c4705.unl.edu", "nautilus-it-gpu01.fullerton.edu", "nautilus-it-gpu02.fullerton.edu", "nautilus-it-gpu03.fullerton.edu", "nautilus-ext-gpu01.fullerton.edu"]
+  "excluded_nodes": [
+    "hcc-nrp-shor-c6017.unl.edu",
+    "hcc-chase-shor-c4705.unl.edu",
+    "nautilus-it-gpu01.fullerton.edu",
+    "nautilus-it-gpu02.fullerton.edu",
+    "nautilus-it-gpu03.fullerton.edu",
+    "nautilus-ext-gpu01.fullerton.edu"
+  ],
+  "gpu_auto": true,
+  "gpu_min_memory_mib": {
+    "state": 22000,
+    "rgb": 45000,
+    "map": 45000
+  }
 }

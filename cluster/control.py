@@ -70,27 +70,41 @@ def new_experiment(task, mode, seed, kind='train'):
 def remote_path(cfg, run_id, exp):
     if exp['kind'] == 'validation':
         return '{}/{}/validation/attempt-{}'.format(cfg['remote_root'], run_id, exp['attempt'])
+    if exp['kind'] == 'evaluate':
+        return '{}/{}/{}/{}/seed{}/evaluation-v1/attempt-{}'.format(
+            cfg['remote_root'], run_id, exp['task'], exp['mode'], exp['seed'], exp['attempt'])
     return '{}/{}/{}/{}/seed{}/attempt-{}'.format(
         cfg['remote_root'], run_id, exp['task'], exp['mode'], exp['seed'], exp['attempt'])
 
 
 def job_manifest(cfg, run_id, exp):
     identity = '{}/{}/{}/{}/{}'.format(run_id, exp['task'], exp['mode'], exp['seed'], exp['attempt'])
+    if exp['kind'] == 'evaluate':
+        identity += '/evaluate'
     digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
     name = 'mayn-{}-{}-{}-a{}'.format(exp['task'].lower()[:18], exp['mode'], digest, exp['attempt'])
     labels = {'app.kubernetes.io/name': APP, 'mayn-run': run_label(run_id), 'mayn-kind': exp['kind']}
     spec = {'task': exp['task'], 'mode': exp['mode'], 'seed': exp['seed'], 'kind': exp['kind'],
                 'output': remote_path(cfg, run_id, exp), 'previous': exp['previous'],
                 'config': cfg, 'run_id': run_id}
-    resources = {cfg['gpu_resource']: 1, 'cpu': cfg['cpu'],
+    if exp['kind'] == 'evaluate':
+        spec['checkpoint'] = exp['checkpoint']
+    gpu = exp.get('gpu', {'resource': cfg['gpu_resource'], 'products': cfg['gpu_products']})
+    resources = {gpu['resource']: 1, 'cpu': cfg['cpu'],
                  'memory': '{}Gi'.format(cfg['memory_gi'] * exp['memory_multiplier']),
                  'ephemeral-storage': cfg['ephemeral_storage']}
-    expressions = [{'key': 'nvidia.com/gpu.product', 'operator': 'In', 'values': cfg['gpu_products']}]
+    expressions = [{'key': 'nvidia.com/gpu.product', 'operator': 'In', 'values': gpu['products']}]
+    if 'min_memory_mib' in gpu:
+        expressions += [{'key': 'nvidia.com/gpu.memory', 'operator': 'Gt',
+                         'values': [str(gpu['min_memory_mib'] - 1)]},
+                        {'key': 'nvidia.com/gpu.compute.major', 'operator': 'Gt', 'values': ['7']},
+                        {'key': 'kubernetes.io/arch', 'operator': 'In', 'values': ['amd64']}]
     excluded = sorted(set(cfg['excluded_nodes'] + exp['excluded_nodes']))
     if excluded:
         expressions.append({'key': 'kubernetes.io/hostname', 'operator': 'NotIn', 'values': excluded})
     pod = {
         'restartPolicy': 'Never', 'automountServiceAccountToken': False,
+        'tolerations': [{'key': 'nvidia.com/gpu', 'operator': 'Exists', 'effect': 'NoSchedule'}],
         'affinity': {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {
             'nodeSelectorTerms': [{'matchExpressions': expressions}]}}},
         'containers': [{'name': 'worker', 'image': cfg.get('resolved_image') or cfg['image'],
@@ -309,7 +323,7 @@ class Controller:
         items = self.kube.snapshot(self.run_id)
         jobs = {x['metadata']['name']: x for x in items if x['kind'] == 'Job'}
         pods = [x for x in items if x['kind'] == 'Pod']
-        for exp in [self.data['validation']] + self.data['experiments']:
+        for exp in [self.data['validation']] + self.data['experiments'] + self.data.get('evaluations', []):
             job = jobs.get(exp.get('job'))
             if job and exp['status'] in ('submitting', 'submitted', 'needs_agent'):
                 if exp.get('uid') and exp['uid'] != job['metadata']['uid']:
@@ -341,7 +355,7 @@ class Controller:
                 self.save()
                 return
             self.data['started'] = True
-        all_exp = [self.data['validation']] + self.data['experiments']
+        all_exp = [self.data['validation']] + self.data['experiments'] + self.data.get('evaluations', [])
         for exp in all_exp:
             if exp['status'] == 'fetched':
                 if exp.get('job'):
@@ -386,7 +400,8 @@ class Controller:
                 grace = self.cfg['stall_seconds'] if exp.get('steps', 0) > 0 else self.cfg['startup_grace_seconds']
                 if time.time() - exp.get('progress_at', exp['submitted_at']) > grace:
                     self.decide(exp, owned, failed=False)
-        allowed = self.data['experiments'] if self.data['validation']['status'] in ('fetched', 'skipped') else [self.data['validation']]
+        validated = self.data['validation']['status'] in ('fetched', 'skipped')
+        allowed = self.data['experiments'] + self.data.get('evaluations', []) if validated else [self.data['validation']]
         busy = {o['uid'] for p in pods if p.get('status', {}).get('phase') in ('Running', 'Pending', 'Unknown')
                 for o in p['metadata'].get('ownerReferences', []) if o.get('uid')}
         terminal = {j['metadata']['uid'] for j in jobs.values() if any(
@@ -394,12 +409,18 @@ class Controller:
             for c in j.get('status', {}).get('conditions', []))}
         active = len(busy | {e.get('uid') or e['job'] for e in all_exp
             if e['status'] in ('submitting', 'submitted', 'needs_agent') and e.get('uid') not in terminal})
-        limit = self.cfg['parallelism'] if allowed is self.data['experiments'] else 1
+        limit = self.cfg['parallelism'] if validated else 1
         for exp in allowed:
             if active >= limit:
                 break
             if exp['status'] != 'queued':
                 continue
+            if exp['kind'] == 'evaluate' and not any(
+                    e['task'] == exp['task'] and e['mode'] == exp['mode'] and e['seed'] == exp['seed']
+                    and e['status'] == 'fetched' for e in self.data['experiments']):
+                continue
+            if self.cfg.get('gpu_auto') and exp['kind'] != 'validation' and 'gpu' not in exp:
+                exp['gpu'] = self.kube.choose_gpu(exp)
             manifest = self.manifest(exp)
             exp.update(job=manifest['metadata']['name'], status='submitting', submitted_at=time.time())
             self.save()  # The deterministic identity is durable before the API call.
@@ -416,6 +437,6 @@ class Controller:
             return True
         return (self.data['validation']['status'] == 'held' or (
             self.data['validation']['status'] in ('fetched', 'skipped') and
-            all(e['status'] in ('fetched', 'held') for e in self.data['experiments']))
+            all(e['status'] in ('fetched', 'held') for e in self.data['experiments'] + self.data.get('evaluations', [])))
         ) and all('completion_decision' in e or e['status'] != 'fetched'
-                  for e in [self.data['validation']] + self.data['experiments'] if e.get('job'))
+                  for e in [self.data['validation']] + self.data['experiments'] + self.data.get('evaluations', []) if e.get('job'))

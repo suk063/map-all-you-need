@@ -269,3 +269,26 @@ MJX/Warp의 접촉 계산은 동일한 원본 환경의 반복 실행에서도 �
 물리 비교에는 관측한 GPU 오차 범위의 허용치를 사용합니다. 종료 결과와 RNG는 정확히 비교합니다.
 Map smoke test는 실행 시간을 줄이기 위해 4개 시점과 보충 시점 0개를 사용합니다.
 장기 학습 성능은 별도로 평가해야 합니다.
+
+### Evaluation metrics
+
+Evaluation `task_success_v1` records success once (any native step in the episode),
+final success, successful-step fraction, success rising-edge count and time to first
+success. Accumulation occurs inside action repetition and before cached autoreset;
+steps after native termination do not affect results. Task errors include mean,
+minimum, maximum and final position/orientation errors where applicable. Results
+also include returns, durations, termination/time-limit/nonfinite/out-of-bounds rates,
+action magnitude/change/saturation, and every native metric's sum/mean/max/final.
+JSON contains mean/std/median/p10/p90, valid sample counts, and the Wilson 95% interval
+for success_once; CSV contains every episode. First-success time is null on failure.
+
+Success predicates are evaluation-only and versioned in `benchmark/common/evaluation.py`.
+Cartesian Pick, PushCube and Leap Reorient retain native success predicates (including
+PushCube's required hold duration). Other tasks use explicit benchmark definitions:
+Pick/Cabinet target error <5 cm; orientation Pick also <15 degrees; Handover target
+error <5 cm with right grip <3 cm, left release >5 cm and box above 5 cm; Peg tip
+within 5 mm of socket rear and axis; continuous rotation at least one net positive-z
+turn before dropping. These are not claimed as upstream success criteria. Cabinet
+uses the native handle target, not an invented door-angle target. Rotation is integrated
+angular displacement, not a count of unique orientations. Reward terms never substitute
+for binary success. Old checkpoints remain evaluable without retraining.

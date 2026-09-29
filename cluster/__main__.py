@@ -50,7 +50,7 @@ def status(ctrl):
     print('Run: {}  Updated: {}'.format(ctrl.run_id, ctrl.data.get('updated_at', 'not yet watched')))
     print('{:<28} {:<6} {:<5} {:<12} {:>12} {:>7}  {}'.format(
         'Task', 'Policy', 'Seed', 'Status', 'Steps', 'Attempt', 'Fetched'))
-    for exp in [ctrl.data['validation']] + ctrl.data['experiments']:
+    for exp in [ctrl.data['validation']] + ctrl.data['experiments'] + ctrl.data.get('evaluations', []):
         print('{:<28} {:<6} {:<5} {:<12} {:>12} {:>7}  {}'.format(
             exp['task'], exp['mode'], exp['seed'], exp['status'], exp.get('steps', '-'),
             exp['attempt'], exp.get('local', '-')))
@@ -92,9 +92,9 @@ def watch(ctrl):
                     print('Startup agent: ' + (json.dumps(decision) if decision
                           else 'unavailable; submission waits while the monitor retries. See agent/ logs.'), flush=True)
                     previous['startup'] = decision
-                for exp in [ctrl.data['validation']] + ctrl.data['experiments']:
-                    identity = (exp['task'], exp['mode'], exp['seed'])
-                    event = {k: exp.get(k) for k in ('task', 'mode', 'seed', 'status', 'attempt',
+                for exp in [ctrl.data['validation']] + ctrl.data['experiments'] + ctrl.data.get('evaluations', []):
+                    identity = (exp['task'], exp['mode'], exp['seed'], exp['kind'])
+                    event = {k: exp.get(k) for k in ('task', 'mode', 'seed', 'kind', 'status', 'attempt',
                              'decision', 'completion_decision', 'note', 'transfer_error', 'local')}
                     if event != previous.get(identity):
                         print(json.dumps(event), flush=True)

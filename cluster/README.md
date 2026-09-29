@@ -1,7 +1,7 @@
 # Mac → Nautilus RL
 
 기본값은 **10 task × state/rgb/map × seed 0 = 30개 독립 Job**이다.
-각 policy에 task의 공식 state PPO 학습량을 사용하고, 최대 4개를 동시에 실행한다.
+각 policy에 task의 공식 state PPO 학습량을 사용하고, 최대 30개를 동시에 제출한다.
 설정은 `cluster/config.json` 하나에 모았다. Mac에는 Python 3.9+, `kubectl`,
 로그인된 Codex CLI가 필요하다. 학습 의존성은 Mac에 설치하지 않는다.
 
@@ -50,7 +50,8 @@ Smoke test는 작은 환경 수와 학습량으로 기능을 검증한다. 기�
 장시간 메모리 사용량이나 처리량까지 보장하는 성능 검증은 아니다.
 
 현재 cluster 기본값: `nautilus / erl-ucsd`, PVC `sh-mapping`,
-RTX A6000 1개(`nvidia.com/rtxa6000`), CPU 8, RAM 32Gi. 요청과 limit은 같다.
+GPU 1개, CPU 8, RAM 32Gi. 자동 선택은 Ampere 이상 Linux amd64 노드에서
+state 24GB급(22,000 MiB 이상), RGB/map 48GB급(45,000 MiB 이상)을 후보로 한다. 요청과 limit은 같다.
 Private image는 `image_pull_secret`을 맞추고, public image만 쓰면 `null`로 설정할 수 있다.
 DINO 소스는 이미지의 `/opt/dinov3`, 가중치는
 `/mnt/dino/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth`이다.
@@ -139,3 +140,12 @@ RUN_SPEC='{"kind":"validation","output":"/tmp/mayn-validation","config":{}}' \
 운영 설정은 [reachy-task Nautilus 설정](https://github.com/suk063/reachy-task/blob/main/cluster/config/nautilus.yaml),
 agent 호출은 [OpenAI 공식 non-interactive 문서](https://learn.chatgpt.com/docs/non-interactive-mode#_top)를 참고했다.
 Pod 교체 조건은 [Kubernetes 공식 Job 문서](https://kubernetes.io/docs/concepts/workloads/controllers/job/#delayed-creation-of-replacement-pods)를 따른다.
+
+GPU 자동 선택은 GPU별 Kubernetes resource key와 product/VRAM affinity를 함께
+기록한다. 노드 Ready, 예약/장애 taint, namespace quota, GPU/CPU/RAM 요청량을
+확인해 후보 pool을 선택한다. A6000/A40/A100/L40(S) 등 조건에 맞는 pool을
+사용하며, state는 3090/4090/A5000/A10/L4 등도 후보가 될 수 있다.
+이는 메모리 적합성의 보수적인 후보 조건이며 모든 task의 GPU OOM 부재를
+보장하지 않는다. OOM이면 batch를 자동 축소하지 않고 보류한다.
+`gpu_auto=false`는 기존 `gpu_resource`/`gpu_products` 고정 선택을 사용한다.
+실행 중인 Job의 GPU나 이미지를 바꾸지 않는다.

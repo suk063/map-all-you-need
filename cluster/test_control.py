@@ -50,6 +50,7 @@ class ControlTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.cfg = c.load_config()
+        self.cfg.update(gpu_auto=False, parallelism=4)
         self.cfg['image'] = 'example/rl@sha256:' + 'a' * 64
         self.kube = FakeKube()
         self.agent = lambda *args: {'action': 'retry', 'reason': 'node lost',
