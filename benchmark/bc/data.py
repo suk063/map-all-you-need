@@ -29,9 +29,10 @@ def read_metadata(path, obs_mode):
     recorded_mode = kwargs.get("obs_mode")
     if recorded_mode == "rgb+depth":
         recorded_mode = "rgbd"
-    if recorded_mode not in OBS_MODES:
+    if obs_mode != "map" and recorded_mode not in OBS_MODES:
         raise ValueError("Demo has no supported observations; replay it with --obs-mode state, rgb, or rgbd --save-traj")
-    if recorded_mode != obs_mode:
+    native_mode = {"dino": "rgb", "map": "none"}.get(obs_mode, obs_mode)
+    if obs_mode != "map" and recorded_mode != native_mode:
         raise ValueError(f"Demo mode is {recorded_mode}, requested {obs_mode}; replay the demo in the requested mode")
     control_mode = kwargs.get("control_mode")
     if control_mode is None:
@@ -52,7 +53,7 @@ def read_metadata(path, obs_mode):
     if backend not in ("physx_cpu", "physx_cuda"):
         raise ValueError(f"Unsupported demo simulation backend: {backend}")
     kwargs.pop("num_envs", None)
-    kwargs.update(obs_mode=obs_mode, control_mode=control_mode,
+    kwargs.update(obs_mode=native_mode, control_mode=control_mode,
                   sim_backend=backend, reward_mode="dense")
     return metadata, {"env_id": info["env_id"], "env_kwargs": kwargs}
 
@@ -111,7 +112,10 @@ class DemoDataset(Dataset):
                             raise ValueError(f"{name}: observations must contain T+1 samples for T actions")
                     prepare_observation(read_observation(trajectory["obs"], 0, obs_spec), obs_spec, "cpu")
                 except (KeyError, IndexError, RuntimeError) as exc:
-                    raise ValueError(f"{name}: observation structure does not match {obs_spec['mode']}") from exc
+                    raise ValueError(
+                        f"{name}: incompatible {obs_spec['mode']} observations or missing selected "
+                        f"cameras {obs_spec['cameras']}; replay the demo with these cameras"
+                    ) from exc
                 self.trajectory_ids.append(name)
                 self.ends.append((self.ends[-1] if self.ends else 0) + length)
         if not self.ends:

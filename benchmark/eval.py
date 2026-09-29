@@ -18,11 +18,13 @@ def evaluate(policy, episodes=100, seed=10000, num_envs=None):
         raise ValueError("episodes must be positive")
     cpu_sim = policy.env_config["env_kwargs"]["sim_backend"] == "physx_cpu"
     num_envs = min(episodes, num_envs or (1 if cpu_sim else 8))
-    env = make_env(policy.env_config, num_envs, evaluation=True)
+    mode = policy.obs_spec["mode"]
+    env = make_env(policy.env_config, num_envs, evaluation=True, map_bank=policy.map_bank)
     rows = []
     try:
         obs, _ = env.reset(seed=seed)
-        if observation_spec(obs, policy.obs_spec["mode"]) != policy.obs_spec:
+        if observation_spec(obs, mode, policy.obs_spec["view"], policy.obs_spec["state_input"],
+                            policy.obs_spec.get("dino"), policy.obs_spec.get("map")) != policy.obs_spec:
             raise ValueError("Evaluation observation layout differs from the checkpoint")
         if action_spec(env) != policy.action_spec:
             raise ValueError("Evaluation action layout differs from the checkpoint")
@@ -41,7 +43,8 @@ def evaluate(policy, episodes=100, seed=10000, num_envs=None):
         env.close()
     summary = {key: float(np.mean([row[key] for row in rows])) for key in rows[0] if key != "episode"}
     return {"episodes": episodes, "seed": seed, "num_envs": num_envs,
-            "env_config": policy.env_config, "metrics": summary}, rows
+            "view": policy.obs_spec["view"], "cameras": policy.obs_spec["cameras"],
+            "obs_spec": policy.obs_spec, "env_config": policy.env_config, "metrics": summary}, rows
 
 
 def main():

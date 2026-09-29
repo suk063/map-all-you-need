@@ -16,7 +16,14 @@ from benchmark.common.envs import (
     make_env,
     resolved_config,
 )
-from benchmark.common.policy import Policy, observation_spec, save_policy
+from benchmark.common.mapping import batch_observations
+from benchmark.common.policy import (
+    Policy,
+    add_policy_arguments,
+    observation_spec,
+    policy_options,
+    save_policy,
+)
 from benchmark.common.utils import log_row, run_directory, seed_everything, write_json
 
 
@@ -49,26 +56,40 @@ class ActorCritic(nn.Module):
 
 
 def train(args):
-    if min(args.total_timesteps, args.num_steps, args.update_epochs, args.batch_size, args.save_every) < 1:
+    if min(args.total_timesteps, args.num_steps, args.update_epochs,
+           args.batch_size if args.batch_size is not None else 1, args.save_every) < 1:
         raise ValueError("Training counts must be positive")
     seed_everything(args.seed)
-    num_envs = args.num_envs if args.num_envs is not None else (256 if args.obs_mode == "state" else 32)
+    setup_start = time.monotonic()
+    options = policy_options(args)
+    num_envs = args.num_envs if args.num_envs is not None else (256 if args.obs_mode == "state" else 8 if args.obs_mode == "map" else 32)
+    if args.batch_size is None:
+        args.batch_size = 16 if args.obs_mode == "map" else 256
     config = env_config(args.env_id, args.obs_mode, args.control_mode)
+    if args.obs_mode == "map":
+        config["map"] = options["map_config"]
     env = make_env(config, num_envs)
     try:
         raw_obs, _ = env.reset(seed=args.seed)
-        policy = Policy(observation_spec(raw_obs, args.obs_mode), action_spec(env), resolved_config(config, env)).to(args.device)
+        policy = Policy(observation_spec(raw_obs, args.obs_mode, args.view, **options), action_spec(env),
+                        resolved_config(config, env), env.map_bank).to(args.device)
         agent = ActorCritic(policy).to(args.device)
-        optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        optimizer = torch.optim.Adam((p for p in agent.parameters() if p.requires_grad), lr=args.learning_rate, eps=1e-5)
         output = run_directory(args.output, "rl", args.env_id, args.obs_mode, args.seed)
-        settings = {**vars(args), "num_envs": num_envs, "algorithm": "ppo", "env_config": policy.env_config}
-        write_json(output / "config.json", settings)
         obs = policy.prepare(raw_obs)
+        settings = {**vars(args), "num_envs": num_envs, "algorithm": "ppo", "env_config": policy.env_config,
+                    "obs_spec": policy.obs_spec, "setup_seconds": time.monotonic() - setup_start,
+                    "trainable_parameters": sum(p.numel() for p in agent.parameters() if p.requires_grad)}
+        if args.obs_mode == "map":
+            settings["initial_map_points"] = (obs["feature_ids"] >= 0).sum(1).tolist()
+        write_json(output / "config.json", settings)
+        if policy.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(policy.device)
         step_count, iteration, start = 0, 0, time.monotonic()
         while step_count < args.total_timesteps:
             iteration += 1
             steps = min(args.num_steps, math.ceil((args.total_timesteps - step_count) / num_envs))
-            observations = {k: torch.empty((steps, *v.shape), dtype=v.dtype, device=args.device) for k, v in obs.items()}
+            observations = []
             shape = (steps, num_envs)
             actions = torch.empty((*shape, policy.mean.out_features), device=args.device)
             log_probs, rewards, values, next_values = [torch.empty(shape, device=args.device) for _ in range(4)]
@@ -76,8 +97,7 @@ def train(args):
             episode_metrics = []
             with torch.no_grad():
                 for t in range(steps):
-                    for key in obs:
-                        observations[key][t] = obs[key]
+                    observations.append({key: value.clone() for key, value in obs.items()})
                     action, log_prob, _, value = agent.action_value(obs)
                     # Store the sampled action/log-probability; only the executed action is clipped.
                     actions[t], log_probs[t], values[t] = action, log_prob, value
@@ -96,7 +116,8 @@ def train(args):
                     step_count += num_envs
                 advantages, returns = compute_gae(rewards, values, next_values, terminated, truncated, args.gamma, args.gae_lambda)
 
-            flat_obs = {k: v.flatten(0, 1) for k, v in observations.items()}
+            flat_obs = batch_observations(observations)
+            del observations
             flat_actions = actions.flatten(0, 1)
             old_log_probs, advantages, returns = log_probs.flatten(), advantages.flatten(), returns.flatten()
             advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
@@ -125,9 +146,12 @@ def train(args):
                     break
             metrics = {k: torch.cat([m[k] for m in episode_metrics]).mean().item()
                        if episode_metrics else None for k in ("return", "success_once")}
+            seconds = time.monotonic() - start
             log_row(output / "train.csv", {
                 "iteration": iteration, "steps": step_count,
-                "seconds": time.monotonic() - start, "policy_loss": policy_loss.item(),
+                "seconds": seconds, "samples_per_second": step_count / seconds,
+                "peak_gpu_memory_mb": torch.cuda.max_memory_allocated(policy.device) / 2**20 if policy.device.type == "cuda" else None,
+                "policy_loss": policy_loss.item(),
                 "value_loss": value_loss.item(), "entropy": entropy.mean().item(),
                 "approx_kl": approx_kl, **metrics,
             })
@@ -143,12 +167,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-id", choices=TASKS, default="PickCube-v1")
     parser.add_argument("--obs-mode", choices=OBS_MODES, default="state")
+    add_policy_arguments(parser)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num-envs", type=int)
     parser.add_argument("--total-timesteps", type=int, default=10_000_000)
     parser.add_argument("--num-steps", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, help="Default: 16 for map, 256 otherwise")
     parser.add_argument("--update-epochs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)

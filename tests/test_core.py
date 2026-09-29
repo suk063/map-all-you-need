@@ -45,7 +45,7 @@ def visual_obs():
             "extra": {"is_grasped": np.array([True]), "goal_pos": np.array([[3, 4, 5]], dtype=np.float32)},
             "sensor_data": {key: {"rgb": np.full((1, 8, 8, 3), rgb, np.uint8),
                                    "depth": np.full((1, 8, 8, 1), 1500, np.uint16)}
-                            for key, rgb in [("wrist", 255), ("base", 0)]}}
+                            for key, rgb in [("hand_camera", 255), ("base_camera", 0)]}}
 
 
 def write_tree(group, tree):
@@ -71,7 +71,7 @@ def test_policy_checkpoint_roundtrip(tmp_path, mode):
     assert restored.env_config == policy.env_config
     if mode != "state":
         prepared = restored.prepare(obs)
-        assert spec["cameras"] == ["base", "wrist"]
+        assert spec["cameras"] == ["base_camera", "hand_camera"]
         assert prepared["rgb"].shape == (1, 6, 128, 128)
         assert prepared["rgb"][0, :3].max() == 0
         assert prepared["rgb"][0, 3:].min() == 255
@@ -180,3 +180,93 @@ def test_rl_demo_preserves_unclipped_actions(tmp_path):
         torch.testing.assert_close(dataset[0][1], torch.tensor([2.5, -3.0]))
     finally:
         dataset.close()
+
+
+@pytest.mark.parametrize("mode", ["rgb", "rgbd"])
+@pytest.mark.parametrize("view,expected", [
+    ("external", ["base_camera"]),
+    ("wrist", ["hand_camera"]),
+    ("all", ["base_camera", "hand_camera"]),
+])
+def test_camera_view_input_and_checkpoint(tmp_path, mode, view, expected):
+    obs = visual_obs()
+    spec = observation_spec(obs, mode, view)
+    assert spec["cameras"] == expected
+    actions = [{"key": None, "size": 2, "low": [-1.0, -1.0], "high": [1.0, 1.0]}]
+    policy = Policy(spec, actions, env_config("PegInsertionSide-v1", mode)).eval()
+    prepared = policy.prepare(obs)
+    assert prepared["rgb"].shape == (1, len(expected) * 3, 128, 128)
+    if view == "external":
+        assert torch.all(prepared["rgb"] == 0)
+    elif view == "wrist":
+        assert torch.all(prepared["rgb"] == 255)
+    if mode == "rgbd":
+        assert prepared["depth"].shape == (1, len(expected), 128, 128)
+        assert torch.all(prepared["depth"] == 1.5)
+    full = prepare_observation(obs, observation_spec(obs, mode), "cpu")
+    torch.testing.assert_close(prepared["state"], full["state"])
+    path = tmp_path / "policy.pt"
+    save_policy(path, policy, {"algorithm": "bc", "view": view})
+    loaded = load_policy(path)
+    assert loaded.obs_spec == spec
+    torch.testing.assert_close(loaded.act(obs), policy.act(obs), rtol=0, atol=0)
+
+
+def test_both_robot_wrist_cameras_are_selected():
+    obs = visual_obs()
+    wrist = obs["sensor_data"].pop("hand_camera")
+    obs["sensor_data"].update({f"panda_wristcam-{i}-hand_camera": wrist for i in (0, 1)})
+    spec = observation_spec(obs, "rgbd", "wrist")
+    assert spec["cameras"] == ["panda_wristcam-0-hand_camera", "panda_wristcam-1-hand_camera"]
+    assert observation_spec(obs, "rgbd", "external")["cameras"] == ["base_camera"]
+    assert prepare_observation(obs, spec, "cpu")["rgb"].shape == (1, 6, 128, 128)
+
+
+def test_missing_views_and_state_view_fail_clearly():
+    obs = visual_obs()
+    del obs["sensor_data"]["hand_camera"]
+    with pytest.raises(ValueError, match="No cameras.*wrist.*base_camera"):
+        observation_spec(obs, "rgb", "wrist")
+    obs = visual_obs()
+    del obs["sensor_data"]["base_camera"]
+    with pytest.raises(ValueError, match="No cameras.*external.*hand_camera"):
+        observation_spec(obs, "rgbd", "external")
+    with pytest.raises(ValueError, match="requires --obs-mode rgb or rgbd"):
+        observation_spec(np.zeros((1, 5)), "state", "wrist")
+
+
+@pytest.mark.parametrize("view,unused", [("wrist", "base_camera"), ("external", "hand_camera")])
+def test_bc_does_not_read_unselected_cameras(tmp_path, view, unused):
+    path, metadata, _, actions, obs = demo_fixture(tmp_path, "rgbd")
+    spec = observation_spec(obs, "rgbd", view)
+    with h5py.File(path, "a") as f:
+        for name in f:
+            del f[f"{name}/obs/sensor_data/{unused}"]
+    dataset = DemoDataset(path, metadata, spec, actions)
+    try:
+        sample, _ = dataset[0]
+        expected = prepare_observation(obs, spec, "cpu")
+        for key in sample:
+            torch.testing.assert_close(sample[key], expected[key][0])
+    finally:
+        dataset.close()
+    with pytest.raises(ValueError, match="missing selected cameras"):
+        DemoDataset(path, metadata, observation_spec(obs, "rgbd", "all"), actions)
+
+
+@pytest.mark.parametrize("mode", ["state", "rgbd"])
+def test_legacy_checkpoint_without_view_loads_as_all(tmp_path, mode):
+    obs = np.ones((1, 5), np.float32) if mode == "state" else visual_obs()
+    spec = observation_spec(obs, mode)
+    actions = [{"key": None, "size": 2, "low": [-1.0, -1.0], "high": [1.0, 1.0]}]
+    policy = Policy(spec, actions, env_config("PickCube-v1", mode)).eval()
+    path = tmp_path / "legacy.pt"
+    save_policy(path, policy, {"algorithm": "ppo"})
+    checkpoint = torch.load(path, weights_only=True)
+    del checkpoint["obs_spec"]["view"]
+    del checkpoint["obs_spec"]["state_input"]
+    torch.save(checkpoint, path)
+    loaded = load_policy(path)
+    assert loaded.obs_spec == observation_spec(obs, mode)
+    assert loaded.obs_spec["view"] == "all"
+    torch.testing.assert_close(loaded.act(obs), policy.act(obs), rtol=0, atol=0)

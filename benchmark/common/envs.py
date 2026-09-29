@@ -11,7 +11,7 @@ TASKS = (
     "PushCube-v1", "PushT-v1", "RollBall-v1", "StackCube-v1",
     "TwoRobotPickCube-v1", "TwoRobotStackCube-v1",
 )
-OBS_MODES = ("state", "rgb", "rgbd")
+OBS_MODES = ("state", "rgb", "rgbd", "dino", "map")
 
 
 def shared_control_mode(mode):
@@ -30,12 +30,12 @@ def env_config(env_id, obs_mode, control_mode="pd_joint_delta_pos"):
     if env_id not in TASKS or obs_mode not in OBS_MODES:
         raise ValueError(f"Unsupported task/observation: {env_id}/{obs_mode}")
     return {"env_id": env_id, "env_kwargs": {
-        "obs_mode": obs_mode, "control_mode": shared_control_mode(control_mode),
+        "obs_mode": {"dino": "rgb", "map": "none"}.get(obs_mode, obs_mode), "control_mode": shared_control_mode(control_mode),
         "reward_mode": "dense", "sim_backend": "physx_cuda",
     }}
 
 
-def make_env(config, num_envs=1, evaluation=False):
+def make_env(config, num_envs=1, evaluation=False, map_bank=None):
     import mani_skill.envs  # noqa: F401  Registers ManiSkill environments.
     from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
     from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
@@ -46,7 +46,7 @@ def make_env(config, num_envs=1, evaluation=False):
     kwargs["control_mode"] = shared_control_mode(kwargs["control_mode"])
     if isinstance(kwargs.get("robot_uids"), list):
         kwargs["robot_uids"] = tuple(kwargs["robot_uids"])
-    if kwargs["obs_mode"] not in OBS_MODES:
+    if kwargs["obs_mode"] not in ("state", "rgb", "rgbd", "none"):
         raise ValueError(f"Unsupported observation mode: {kwargs['obs_mode']}")
     if num_envs < 1:
         raise ValueError("num_envs must be positive")
@@ -58,10 +58,18 @@ def make_env(config, num_envs=1, evaluation=False):
     env = gym.make(config["env_id"], **kwargs)
     if isinstance(env.unwrapped.single_action_space, gym.spaces.Dict):
         env = FlattenActionSpaceWrapper(env)
+    mapper = None
+    if "map" in config:
+        from benchmark.common.mapping import MapObservationWrapper
+        mapper = MapObservationWrapper(env, config["map"], map_bank)
+        env = mapper
     # Full horizons allow object reconfiguration on reset (notably YCB tasks).
-    return ManiSkillVectorEnv(
+    vector = ManiSkillVectorEnv(
         env, auto_reset=True, ignore_terminations=True, record_metrics=True,
     )
+    vector.map_wrapper = mapper
+    vector.map_bank = mapper.bank if mapper is not None else None
+    return vector
 
 
 def resolved_config(config, env):
