@@ -33,16 +33,16 @@ PyTorch는 사전 특징 추출에만 사용하며 policy와 PPO 학습은 모�
 
 | Task | Action 차원 | 지원 입력 |
 |---|---:|---|
-| AlohaHandOver | 14 | state, map |
-| AlohaSinglePegInsertion | 14 | state, map |
-| PandaPickCube | 8 | state, map |
-| PandaPickCubeOrientation | 8 | state, map |
+| AlohaHandOver | 14 | state, rgb, map |
+| AlohaSinglePegInsertion | 14 | state, rgb, map |
+| PandaPickCube | 8 | state, rgb, map |
+| PandaPickCubeOrientation | 8 | state, rgb, map |
 | PandaPickCubeCartesian | 3 | state, rgb, map |
-| PandaOpenCabinet | 8 | state, map |
-| PandaRobotiqPushCube | 7 | state, map |
-| LeapCubeReorient | 16 | state, map |
-| LeapCubeRotateZAxis | 16 | state, map |
-| AeroCubeRotateZAxis | 7 | state, map |
+| PandaOpenCabinet | 8 | state, rgb, map |
+| PandaRobotiqPushCube | 7 | state, rgb, map |
+| LeapCubeReorient | 16 | state, rgb, map |
+| LeapCubeRotateZAxis | 16 | state, rgb, map |
+| AeroCubeRotateZAxis | 7 | state, rgb, map |
 
 Action은 task에 직접 전달합니다. 제어 방식·스케일·reward·episode 길이·종료 조건을 바꾸지 않습니다.
 예를 들어 `PandaPickCube`는 관절 위치 변화량, `PandaPickCubeCartesian`은 해당 task의
@@ -53,15 +53,18 @@ Action은 task에 직접 전달합니다. 제어 방식·스케일·reward·epis
 따라서 목표가 무작위로 바뀌는 task의 map 관측에는 목표 자체를 알려주는 정보가 없습니다.
 
 - **state**: 공식 관측과 MLP를 사용합니다. 손 task의 history·노이즈, 공식 privileged-state critic도 유지합니다.
-- **rgb**: 공식 vision 경로의 `pixels/view_0`, 64×64 RGB와 Brax CNN을 사용합니다.
-  RGB는 task가 제공하는 float 값 그대로 입력하고 추가 resize·state 입력을 하지 않습니다.
+- **rgb**: native state 환경에 공통 batch renderer를 적용하여 `pixels/view_0`, 64×64 RGB와 Brax CNN을 사용합니다.
+  공식 action repeat·autoreset 이후 렌더링하고 추가 state 입력을 하지 않습니다.
   Actor와 critic은 각각 CNN을 가지며 둘 다 RGB만 받습니다.
 - **map**: 기본 비영상 환경의 관측을 아래의 component map으로 교체합니다.
   Actor와 critic은 각각 Point Transformer를 가지며 둘 다 map만 받습니다.
 
-RGB는 공식 지원 task에만 허용합니다. `PandaPickCubeCartesian`의 공식 vision 설정은
-일부 reward와 성공 판정도 변경합니다. 따라서 state/map과 RGB의 결과는
-동일한 MDP에서 관측만 바꾼 비교가 아닙니다. 이 차이를 임의로 통일하지 않습니다.
+신규 RGB는 모든 task에서 state/map과 같은 물리·reward·성공·종료 조건을 사용합니다.
+Cartesian도 native state 설정을 사용하며, 기존 format-2 Cartesian RGB checkpoint는
+저장된 공식 vision 설정으로 계속 평가합니다. RGB renderer는 MJX/Warp를 사용하고,
+영상 생성 전용 모델을 분리하여 state/map의 simulator 설정을 유지합니다.
+카메라는 Aloha `overhead_cam`, Cartesian `front`, Cabinet·Leap·Aero `side`이며,
+카메라가 없는 Panda Pick 계열과 PushCube에는 scene 기본 시점의 고정 카메라를 추가합니다.
 [공식 환경 소스](https://github.com/google-deepmind/mujoco_playground/blob/ef4fefc13033c0468af4ef651847f5348af0c7d7/mujoco_playground/_src/manipulation/franka_emika_panda/pick_cartesian.py),
 [공식 PPO 설정](https://github.com/google-deepmind/mujoco_playground/blob/ef4fefc13033c0468af4ef651847f5348af0c7d7/mujoco_playground/config/manipulation_params.py).
 
@@ -135,7 +138,9 @@ python -m benchmark.rl.train --env-id PandaRobotiqPushCube --obs-mode map
 python -m benchmark.rl.train --help
 ```
 
-State/RGB는 공식 task별 PPO hyperparameter와 학습량을 기본값으로 사용합니다.
+State는 공식 task별 PPO hyperparameter와 학습량을 기본값으로 사용합니다.
+RGB는 동일한 state 학습량과 PPO 설정에 CNN을 결합하고 환경 수 128, 평가 환경 수 8,
+`batch_size=16`, 관측 정규화 비활성화를 적용합니다.
 Map도 해당 task의 state PPO 설정을 사용하되 환경 수 8, 평가 환경 수 8,
 Brax `batch_size=1`, 관측 정규화 비활성화를 적용합니다. 특징 ID·좌표를 정규화하지 않습니다.
 Domain randomization은 공식 학습 script의 기본값처럼 별도로 활성화하지 않습니다.
@@ -178,12 +183,20 @@ python -m benchmark.eval --checkpoint runs/rl/PandaPickCubeCartesian/map/<run> \
 Return·episode 길이와 task 지표의 누적값(`sum/`)·종료 시 값(`final/`)을 저장합니다.
 성공 지표가 없는 task에는 임의의 성공 기준을 추가하지 않습니다.
 
-Map 실행 디렉터리가 참조하는 cache 파일도 보관해야 합니다. 다른 머신으로 옮길 때는
-기록된 cache 경로를 사용할 수 있어야 합니다. 평가에서 cache가 존재하면 DINO 가중치를 다시 읽지 않습니다.
+`--resume <이전 실행 디렉터리> --output <새 디렉터리>`로 저장된 actor·critic·normalizer를
+복구하고 전체 목표에서 저장된 누적 step을 뺀 만큼 학습합니다. Optimizer와 RNG는 초기화됩니다.
+읽을 수 없는 불완전 checkpoint는 제외합니다. `--checkpoint-steps 1000000`으로
+중간 평가 여부와 독립적으로 checkpoint 저장 간격을 지정할 수 있습니다.
+
+Map 실행 디렉터리가 참조하는 cache 파일도 보관해야 합니다. 실행 디렉터리의 `map-cache/`에
+해당 파일을 동봉하면 옮긴 위치를 우선 사용합니다. cache가 있으면 DINO 가중치를 다시 읽지 않습니다.
 기존 PyTorch `.pt` checkpoint, BC, `rgbd`, 독립 `dino` 모드와
 `--control-mode`, `--view`, `--state-input` 옵션은 지원하지 않습니다.
 
 ## 코드와 검증
+
+Mac에서 30개 cluster Job을 제출·agent 감시·복구·다운로드하는 실행법은
+[cluster/README.md](cluster/README.md)에 정리했습니다. 본 학습 전에 같은 이미지의 GPU smoke test를 통과해야 합니다.
 
 `util/view_scene.py`는 [mjviser](https://github.com/mujocolab/mjviser)의 브라우저 viewer로
 10개 task를 모두 지원합니다. 공식 task의 seed별 reset 상태를 복사해 정지 상태로 시작합니다.

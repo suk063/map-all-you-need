@@ -354,6 +354,8 @@ class MapObservationWrapper(Wrapper):
                 key = appearance_key(env.mj_model, geoms, mesh, config, table)
                 path = Path(config["cache"]) / f"{key}.h5"
                 if not path.is_file():
+                    if config.get("cache_read_only"):
+                        raise ValueError(f"Incomplete bundled map cache: {path}")
                     import torch
 
                     from benchmark.common.dino import FrozenDINO

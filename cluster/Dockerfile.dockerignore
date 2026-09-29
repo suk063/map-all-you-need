@@ -1,0 +1,9 @@
+.git
+.venv
+.cache
+__pycache__
+**/__pycache__
+runs
+reports
+.assets
+*.pth

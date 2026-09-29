@@ -3,25 +3,40 @@
 import csv
 import gc
 import importlib
+import json
+import os
+import shutil
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import mujoco
-from mujoco import mjx
 import numpy as np
 import optax
 import pytest
 import torch
 from ml_collections import ConfigDict
+from mujoco import mjx
 from mujoco_playground import registry
 from mujoco_playground._src import wrapper
 
 import benchmark  # noqa: F401
 from benchmark.common.dino import dino_config
-from benchmark.common.envs import DEFAULT_TASK, GOAL_BODIES, TASKS, NonVisionWrapper, env_config, make_env
-from benchmark.common.mapping import MapObservationWrapper, components, quat_matrix, visual_mesh
-from benchmark.common.policy import load_policy
+from benchmark.common.envs import (
+    DEFAULT_TASK,
+    GOAL_BODIES,
+    TASKS,
+    NonVisionWrapper,
+    env_config,
+    make_env,
+)
+from benchmark.common.mapping import (
+    MapObservationWrapper,
+    components,
+    quat_matrix,
+    visual_mesh,
+)
+from benchmark.common.policy import latest_checkpoint, load_policy
 from benchmark.eval import evaluate
 
 pytestmark = pytest.mark.integration
@@ -140,16 +155,49 @@ def test_task_visual_parts_and_goal_removal(task):
         np.testing.assert_allclose(data.xpos[handle] - first[0][handle], [.05, 0, 0], atol=1e-7)
 
 
-def test_native_rgb():
-    native = make_env(env_config(DEFAULT_TASK, "rgb"), num_envs=2)
-    env = wrapper.wrap_for_brax_training(native, episode_length=200, action_repeat=1)
+@pytest.mark.parametrize('task', TASKS)
+def test_native_rgb(task):
+    config = env_config(task, 'rgb')
+    native = make_env(config, num_envs=2)
+    reference = make_env(env_config(task, 'state'))
+    repeat = config['environment']['action_repeat']
+    env = wrapper.wrap_for_brax_training(native, episode_length=repeat * 2, action_repeat=repeat)
+    raw = wrapper.wrap_for_brax_training(reference, episode_length=repeat * 2, action_repeat=repeat)
+    assert isinstance(env, wrapper.DeferredVisionWrapper)
+    assert env.unwrapped is native
     state = jax.jit(env.reset)(jax.random.split(jax.random.PRNGKey(0), 2))
-    state = jax.jit(env.step)(state, jnp.zeros((2, 3)))
+    original = jax.jit(raw.reset)(jax.random.split(jax.random.PRNGKey(0), 2))
+    rgb_step, state_step = jax.jit(env.step), jax.jit(raw.step)
+    action = jnp.full((2, native.action_size), .05)
+    for _ in range(5):
+        state, original = rgb_step(state, action), state_step(original, action)
+        tolerances = {'LeapCubeRotateZAxis': (2e-5, 1e-3, 2e-3),
+                      'PandaRobotiqPushCube': (1e-6, 1e-4, 1e-5)}.get(task, (1e-6, 1e-6, 1e-5))
+        for (x, y), atol in zip(((state.data.qpos, original.data.qpos), (state.data.qvel, original.data.qvel),
+                                (state.reward, original.reward)), tolerances):
+            np.testing.assert_allclose(x, y, rtol=1e-5, atol=atol)
+        np.testing.assert_array_equal(state.done, original.done)
+        np.testing.assert_array_equal(state.info['rng'], original.info['rng'])
+        for x, y in zip(jax.tree.leaves(state.info['DeferredVisionWrapper_obs']), jax.tree.leaves(original.obs)):
+            np.testing.assert_allclose(x, y, rtol=1e-4, atol=2e-3)
     assert set(state.obs) == {'pixels/view_0'}
     pixels = np.asarray(state.obs['pixels/view_0'])
     assert pixels.shape == (2, 64, 64, 3)
+    assert pixels.dtype == np.float32
     assert np.isfinite(pixels).all() and pixels.min() >= 0 and pixels.max() <= 1
     assert pixels.std() > 0
+    # Optional validation artifacts allow review of framing, not just shapes.
+    if os.environ.get('RGB_VALIDATION_OUTPUT'):
+        from PIL import Image
+        directory = Path(os.environ['RGB_VALIDATION_OUTPUT'])
+        directory.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(np.round(pixels[0] * 255).astype(np.uint8)).save(directory / f'{task}.png')
+    # Rendering returns the exact native dynamics data, never a private camera model's data.
+    rerendered = native.render_state(state)
+    for x, y in zip(jax.tree.leaves(state.data), jax.tree.leaves(rerendered.data)):
+        np.testing.assert_array_equal(x, y)
+    if task != DEFAULT_TASK:
+        return
     goal = native.mj_model.body('mocap_target').id
     mocap = int(native.mj_model.body_mocapid[goal])
 
@@ -166,8 +214,9 @@ def test_native_rgb():
     np.testing.assert_array_equal(near, far)
 
 
+@pytest.mark.parametrize('task', TASKS)
 @pytest.mark.parametrize('mode', ['state', 'rgb', 'map'])
-def test_training_checkpoint_and_evaluation(tmp_path, monkeypatch, mode):
+def test_training_checkpoint_and_evaluation(tmp_path, monkeypatch, mode, task):
     train_module = importlib.import_module('benchmark.rl.train')
     real_train = train_module.ppo.train
     real_gradient = train_module.ppo.gradients.loss_and_pgrad
@@ -193,9 +242,10 @@ def test_training_checkpoint_and_evaluation(tmp_path, monkeypatch, mode):
     monkeypatch.setattr(train_module.ppo, 'train', checked_train)
     monkeypatch.setattr(train_module.ppo.gradients, 'loss_and_pgrad', measured_gradient)
     args = train_module.parser().parse_args([
-        '--obs-mode', mode, '--num-envs', '2', '--num-eval-envs', '1',
+        '--env-id', task, '--obs-mode', mode, '--num-envs', '2', '--num-eval-envs', '1',
         '--total-timesteps', '8', '--unroll-length', '2', '--batch-size', '2',
         '--num-minibatches', '1', '--num-updates-per-batch', '1', '--num-evals', '2',
+        '--num-resets-per-eval', '1',
         '--map-views', '4', '--map-extra-views', '0',
         '--output', str(tmp_path / mode),
     ])
@@ -211,6 +261,7 @@ def test_training_checkpoint_and_evaluation(tmp_path, monkeypatch, mode):
     assert all(np.isfinite(x).all() for x in after)
     assert any(not np.array_equal(a, b) for a, b in zip(before, after))
     policy = load_policy(run)
+    assert policy.checkpoint.parent == run / 'checkpoints'
     env = make_env(policy.env_config, 1)
     env = wrapper.wrap_for_brax_training(env, policy.metadata['ppo']['episode_length'], policy.metadata['ppo']['action_repeat'])
     state = jax.jit(env.reset)(jax.random.split(jax.random.PRNGKey(7), 1))
@@ -220,3 +271,90 @@ def test_training_checkpoint_and_evaluation(tmp_path, monkeypatch, mode):
     assert summary['episodes'] == len(rows) == 3
     assert all(np.isfinite(value) for row in rows for value in row.values())
     assert all(row['episode_len'] <= policy.metadata['ppo']['episode_length'] for row in rows)
+    if mode == 'rgb' and task == DEFAULT_TASK:
+        legacy = tmp_path / 'legacy-format2-rgb'
+        shutil.copytree(run, legacy)
+        metadata = json.loads((legacy / 'config.json').read_text())
+        metadata['format_version'] = 2
+        metadata['env_config'].pop('rgb')
+        metadata['env_config']['environment']['vision'] = True
+        metadata.pop('renderer', None)
+        (legacy / 'config.json').write_text(json.dumps(metadata))
+        restored = load_policy(legacy)
+        native_legacy = make_env(restored.env_config, num_envs=1)
+        assert native_legacy.unwrapped._vision
+        assert not hasattr(native_legacy, 'render_metadata')
+        summary, rows = evaluate(restored, episodes=1, num_envs=1)
+        assert summary['episodes'] == len(rows) == 1
+        assert np.isfinite(rows[0]['return'])
+    if mode == 'map' and task == DEFAULT_TASK:
+        moved = tmp_path / 'transferred-map-run'
+        shutil.copytree(run, moved)
+        bundle = moved / 'map-cache'
+        bundle.mkdir()
+        for cache_path in policy.metadata['map_cache_paths']:
+            shutil.copy2(cache_path, bundle / Path(cache_path).name)
+        metadata = json.loads((moved / 'config.json').read_text())
+        metadata['env_config']['map']['dino'].update(source='/missing/dino-source', weights='/missing/weights.pth')
+        metadata['map_cache_paths'] = ['/missing/original-cache/' + Path(path).name for path in metadata['map_cache_paths']]
+        (moved / 'config.json').write_text(json.dumps(metadata))
+        monkeypatch.setattr('benchmark.common.dino.FrozenDINO', lambda *_: pytest.fail('Cache hit must not load DINO'))
+        portable = load_policy(moved)
+        assert portable.checkpoint.parent == moved / 'checkpoints'
+        assert all(Path(path).parent == bundle for path in portable.metadata['map_cache_paths'])
+        summary, rows = evaluate(portable, episodes=1, num_envs=1)
+        assert summary['episodes'] == len(rows) == 1
+
+
+@pytest.mark.parametrize('mode', ['state', 'rgb', 'map'])
+def test_real_checkpoint_continuation(tmp_path, monkeypatch, mode):
+    train_module = importlib.import_module('benchmark.rl.train')
+    real_save, real_train = train_module.ppo.checkpoint.save, train_module.ppo.train
+    source = tmp_path / 'interrupted'
+
+    def interrupt_after_save(*args, **kwargs):
+        real_save(*args, **kwargs)
+        raise InterruptedError('simulate worker eviction after finalized checkpoint')
+
+    monkeypatch.setattr(train_module.ppo.checkpoint, 'save', interrupt_after_save)
+    args = train_module.parser().parse_args([
+        '--obs-mode', mode, '--num-envs', '2', '--num-eval-envs', '1', '--no-run-evals',
+        '--total-timesteps', '16', '--unroll-length', '2', '--batch-size', '2',
+        '--num-minibatches', '1', '--num-updates-per-batch', '1', '--checkpoint-steps', '8',
+        '--num-resets-per-eval', '1', '--map-views', '4', '--map-extra-views', '0',
+        '--output', str(source),
+    ])
+    with pytest.raises(InterruptedError, match='worker eviction'):
+        train_module.train(args)
+    checkpoint, saved_params = latest_checkpoint(source)
+    assert int(checkpoint.name) == 8
+    # Neither metrics after the save nor incomplete higher-number saves count.
+    with open(source / 'train.csv', 'a') as stream:
+        stream.write('999999,training/total_loss,0\n')
+    (source / 'checkpoints' / '999999').mkdir()
+    (source / 'checkpoints' / '1000000.orbax-checkpoint-tmp').mkdir()
+    monkeypatch.setattr(train_module.ppo.checkpoint, 'save', real_save)
+    initial = []
+
+    def record(step, _make_policy, params):
+        if step == 0:
+            initial.append(jax.device_get(params))
+
+    def observe_restore(**kwargs):
+        assert kwargs['restore_value_fn']
+        assert kwargs['num_timesteps'] == 8
+        return real_train(**kwargs, policy_params_fn=record)
+
+    monkeypatch.setattr(train_module.ppo, 'train', observe_restore)
+    with pytest.warns(RuntimeWarning, match='Skipped invalid checkpoints'):
+        resumed = train_module.train(train_module.parser().parse_args([
+            '--resume', str(source), '--no-run-evals', '--checkpoint-steps', '8', '--output', str(tmp_path / 'resumed')]))
+    assert len(initial) == 1
+    for actual, expected in zip(jax.tree.leaves(initial[0]), jax.tree.leaves(saved_params)):
+        np.testing.assert_array_equal(actual, expected)
+    metadata = json.loads((resumed / 'config.json').read_text())
+    assert (metadata['target_timesteps'], metadata['resume_base_steps'], metadata['ppo']['num_timesteps']) == (16, 8, 8)
+    final_checkpoint, _ = latest_checkpoint(resumed)
+    assert int(final_checkpoint.name) == 8
+    monkeypatch.setattr(train_module.ppo, 'train', lambda **_: pytest.fail('Completed run retrained'))
+    assert train_module.train(train_module.parser().parse_args(['--resume', str(resumed)])) == resumed

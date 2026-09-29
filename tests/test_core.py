@@ -35,6 +35,7 @@ from benchmark.common.mapping import (
 )
 from benchmark.common.points import MapEncoder
 from benchmark.common.policy import network_factory
+from benchmark.common.rgb import render_model, rgb_config
 from benchmark.rl.train import parser
 
 
@@ -48,22 +49,31 @@ def test_native_configs_and_removed_modes(monkeypatch):
     for mode in ("rgbd", "dino"):
         with pytest.raises(ValueError, match="Unsupported"):
             env_config(DEFAULT_TASK, mode)
-    with pytest.raises(ValueError, match="Official RGB"):
-        env_config("PandaPickCube", "rgb")
+    for task in TASKS:
+        rgb = env_config(task, "rgb")
+        native = env_config(task, "state")
+        assert rgb['environment'] == native['environment']
+        assert not rgb['environment'].get('vision', False)
+        assert rgb['rgb']['resolution'] == [64, 64]
+        expected = manipulation_params.brax_ppo_config(task, native['environment'].get('impl')).to_dict()
+        expected.update(num_envs=128, num_eval_envs=8, batch_size=16, normalize_observations=False)
+        expected['network_factory'] = manipulation_params.brax_vision_ppo_config(DEFAULT_TASK).network_factory.to_dict()
+        assert ppo_config(rgb) == expected
     for flag in ("--control-mode", "--view", "--state-input"):
         with pytest.raises(SystemExit):
             parser().parse_args([flag, "x"])
-    assert parser().parse_args([]).map_background == 'false'
-    assert parser().parse_args([]).map_robot == 'full'
+    assert parser().parse_args([]).map_background is None  # Resume inherits unspecified options.
+    assert parser().parse_args([]).map_robot is None
     assert parser().parse_args(['--map-robot', 'gripper']).map_robot == 'gripper'
     with pytest.raises(SystemExit):
         parser().parse_args(['--map-robot', 'arm'])
     assert parser().parse_args(['--map-background', 'true']).map_background == 'true'
     with pytest.raises(SystemExit):
         parser().parse_args(['--map-background', 'table'])
+    # Format-2 official Cartesian RGB must continue its old native vision path.
     rgb = env_config(DEFAULT_TASK, "rgb")
-    assert rgb["environment"]["vision"]
-    assert tuple(rgb["environment"]["vision_config"]["cam_res"]) == (64, 64)
+    del rgb['rgb']
+    rgb['environment']['vision'] = True
     monkeypatch.setattr('benchmark.common.envs.registry.load', lambda name, config: config)
     monkeypatch.setattr('benchmark.common.envs.hide_goal_markers', lambda *a, **kw: None)
     restored = make_env(json.loads(json.dumps(rgb)), num_envs=3)
@@ -71,6 +81,28 @@ def test_native_configs_and_removed_modes(monkeypatch):
     assert restored.vision_config.nworld == 3
     params = ppo_config(env_config(DEFAULT_TASK, "map"))
     assert (params["num_envs"], params["batch_size"], params["normalize_observations"]) == (8, 1, False)
+
+
+def test_added_camera_preserves_native_model_and_constructor_changes(tmp_path):
+    xml = '''<mujoco><include file="robot.xml"/><statistic center=".4 .1 .2" extent=".8"/>
+      <visual><global azimuth="150" elevation="-30"/></visual></mujoco>'''
+    assets = {'robot.xml': b'''<mujoco><worldbody>
+      <body name="robot" pos=".1 0 .2"><joint name="joint" type="hinge"/>
+      <geom name="visual" type="box" size=".1 .2 .1"/></body></worldbody></mujoco>'''}
+    source = tmp_path / 'scene.xml'
+    source.write_text(xml)
+    native = mujoco.MjModel.from_xml_string(xml, assets=assets)
+    native.geom_rgba[0] = [.2, .8, .1, .9]
+    native.body_pos[1] = [.2, .1, .3]
+    before = copy.copy(native)
+    env = SimpleNamespace(mj_model=native, xml_path=source, _model_assets=assets)
+    rendered = render_model(env, rgb_config('PandaPickCube'))
+    assert native.ncam == 0 and rendered.ncam == 1
+    assert rendered.camera('benchmark_default').id == 0
+    assert np.isfinite(rendered.cam_pos).all() and np.isfinite(rendered.cam_quat).all()
+    for field in ('body_pos', 'geom_rgba', 'geom_size', 'jnt_axis', 'qpos0'):
+        np.testing.assert_array_equal(getattr(native, field), getattr(before, field))
+        np.testing.assert_array_equal(getattr(rendered, field), getattr(native, field))
 
 
 @pytest.fixture(scope="module")

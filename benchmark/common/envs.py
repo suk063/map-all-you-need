@@ -26,23 +26,24 @@ class NonVisionWrapper(Wrapper):
 def env_config(env_id=DEFAULT_TASK, obs_mode="state", impl=None):
     if env_id not in TASKS or obs_mode not in OBS_MODES:
         raise ValueError(f"Unsupported task/observation: {env_id}/{obs_mode}")
-    if obs_mode == "rgb" and env_id != DEFAULT_TASK:
-        raise ValueError(f"Official RGB observations are supported only by {DEFAULT_TASK}")
     config = registry.get_default_config(env_id)
     if impl is not None:
         if "impl" not in config:
             raise ValueError(f"{env_id} does not expose an implementation override")
         config.impl = impl
+    result = {"env_id": env_id, "obs_mode": obs_mode, "goal_markers": False,
+              "environment": config.to_dict()}
     if obs_mode == "rgb":
-        config.vision = True
-    return {"env_id": env_id, "obs_mode": obs_mode, "goal_markers": False,
-            "environment": config.to_dict()}
+        from benchmark.common.rgb import rgb_config
+        result['rgb'] = rgb_config(env_id)
+    return result
 
 
 def ppo_config(config):
-    factory = (manipulation_params.brax_vision_ppo_config if config["obs_mode"] == "rgb"
-               else manipulation_params.brax_ppo_config)
-    params = factory(config["env_id"], config["environment"].get("impl")).to_dict()
+    params = manipulation_params.brax_ppo_config(config["env_id"], config["environment"].get("impl")).to_dict()
+    if config['obs_mode'] == 'rgb':
+        params.update(num_envs=128, num_eval_envs=8, batch_size=16, normalize_observations=False)
+        params['network_factory'] = manipulation_params.brax_vision_ppo_config(DEFAULT_TASK).network_factory.to_dict()
     if config["obs_mode"] == "map":
         params.update(num_envs=8, num_eval_envs=8, batch_size=1, normalize_observations=False)
         params["network_factory"] = {}  # Map actor and critic have their own encoders.
@@ -69,16 +70,20 @@ def hide_goal_markers(env, vision=False):
 def make_env(config, num_envs=1):
     if num_envs < 1:
         raise ValueError("num_envs must be positive")
-    # Validate saved configs too; there is no legacy backend/checkpoint adapter.
+    # Missing `rgb` marks the old format-2 official Cartesian vision behavior.
     env_config(config["env_id"], config["obs_mode"])
     values = config["environment"]
-    if config["obs_mode"] == "rgb":
+    legacy_vision = config["obs_mode"] == "rgb" and 'rgb' not in config
+    if legacy_vision:
         # MuJoCo distinguishes a single (H, W) tuple from a list of per-camera sizes.
         values = {**values, "vision_config": {**values["vision_config"], "nworld": num_envs,
                   "cam_res": tuple(values["vision_config"]["cam_res"])}}
     env = registry.load(config["env_id"], config=ConfigDict(values))
-    hide_goal_markers(env, vision=config["obs_mode"] == "rgb")
-    if config["obs_mode"] != "rgb" and hasattr(env, "defer_rendering"):
+    hide_goal_markers(env, vision=legacy_vision)
+    if config["obs_mode"] == "rgb" and not legacy_vision:
+        from benchmark.common.rgb import RGBObservationWrapper
+        env = RGBObservationWrapper(env, config['rgb'], num_envs)
+    elif not legacy_vision and hasattr(env, "defer_rendering"):
         env = NonVisionWrapper(env)
     if config["obs_mode"] == "map":
         from benchmark.common.mapping import MapObservationWrapper
