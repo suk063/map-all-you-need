@@ -58,6 +58,15 @@ DINO 소스는 이미지의 `/opt/dinov3`, 가중치는
 
 ## 감시와 복구
 
+Map 병목은 학습 이미지의 GPU 환경에서 `python -m cluster.profile_map --run
+ATTEMPT_DIRECTORY --output PROFILE_DIRECTORY`로 측정한다. 저장된 설정·map 캐시로
+물리/관측, actor, FPS, kNN, feature 투영, PPO gradient/optimizer를 동기화해 재고
+`timings.json`과 JAX trace를 저장한다. Reset 관측과 새 파라미터를 사용하는 구성요소
+측정이므로 합산 시간은 실제 학습의 추정치다. Checkpoint는 수정하지 않는다.
+실행 중인 학습 Pod에서 측정할 때는 `--training-pid PID`를 지정하면 측정 구간에만
+그 프로세스를 잠깐 정지하고 재개한다. 별도 watchdog도 20초 후 재개를 보장한다.
+다른 GPU 작업과 이미 제출된 CUDA 연산은 측정에 영향을 줄 수 있다.
+
 Mac에서 `caffeinate -i`와 함께 controller가 실행된다. 기본 60초 간격으로
 Job/Pod·학습 step을 확인하며 다운로드와 agent 판단 중에도 감시를 계속한다.
 Mac의 전원 종료·인터넷 단절·덮개를 닫아 발생하는 잠자기는 막지 못한다.
