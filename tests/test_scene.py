@@ -32,8 +32,8 @@ def test_scene_selection_and_viewer(task):
     if task.startswith('Aloha'):
         meshes = [{model.mesh(int(model.geom_dataid[g])).name for g in ids
                    if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH} for ids in selections]
-        assert 'tabletop' in meshes[0] and 'tablelegs' not in meshes[0]
-        assert {'tablelegs', 'd405_solid'} <= meshes[1]
+        assert all({'tabletop', 'tablelegs'}.isdisjoint(meshes_) for meshes_ in meshes)
+        assert 'd405_solid' in meshes[1]
         assert len(background - core) > 2
     elif task == 'PandaRobotiqPushCube':
         assert {model.geom(g).name for g in background - core} == {'pad', 'camera_tracking_box'}

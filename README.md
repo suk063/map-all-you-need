@@ -81,7 +81,7 @@ Map은 **정확한 simulator pose와 visual geometry를 사용하는 관측**입
 로봇 link·물체를 별도의 MuJoCo render model에서 분리해 256×256으로 관측합니다.
 형상·재질·texture를 유지하고 고정 조명을 사용합니다. 캐시 생성은 task의 모델·물리 상태를 수정하지 않습니다.
 
-구성요소별 local frame에서 1.5cm voxel당 한 점을 유지하고, frozen DINOv3 ViT-L/16의
+구성요소별 local frame에서 2cm voxel당 한 점을 유지하고, frozen DINOv3 ViT-L/16의
 1024차원 특징을 multiview 평균합니다. 기본 96개 구면 시점과 최대 512개 보충 시점을 사용하며,
 관측되지 않은 점은 제외합니다. 점 수 제한으로 전체 map을 자르지는 않습니다.
 그다음에는 특징을 고정하고 MuJoCo의 forward kinematics로 계산된 body pose로 좌표와 normal을 갱신합니다.
@@ -99,7 +99,7 @@ Aloha는 양쪽 gripper, Leap/Aero는 손바닥과 모든 손가락을 포함합
 | 옵션 | 기본값 | 의미 |
 |---|---|---|
 | `--map-robot full\|gripper` | `full` | 로봇 전체 또는 물체 조작에 참여하는 손·gripper |
-| `--map-background true\|false` | `false` | Task와 무관한 scene object도 포함. 바닥·벽은 항상 제외 |
+| `--map-background true\|false` | `false` | Task와 무관한 scene object도 포함. 바닥·벽·Aloha 테이블은 항상 제외 |
 | `--map-cache` | `.cache/maps` | 구성요소별 HDF5 cache |
 | `--map-views` | `96` | 기본 시점 수 |
 | `--map-extra-views` | `512` | 최대 보충 시점 수 |
@@ -119,8 +119,9 @@ Task에 필요한 goal은 `map-background`와 `map-robot` 설정에 관계없이
 | PandaRobotiqPushCube | 바닥, 벽, pad, 투명 camera tracking box |
 | LeapCubeReorient, LeapCubeRotateZAxis, AeroCubeRotateZAxis | 바닥, 손 고정 mount |
 
-Aloha tabletop은 두 task의 `no_table_collision` reward에 사용되므로 항상 윗면을 포함합니다.
-테이블 다리·지지 프레임·카메라 하우징, PushCube의 pad·camera tracking box는
+Aloha 테이블의 상판과 다리는 `--map-background` 설정과 관계없이 map 입력에서 제외합니다.
+물리 테이블과 `no_table_collision` reward는 유지합니다.
+Aloha 지지 프레임·카메라 하우징, PushCube의 pad·camera tracking box는
 `--map-background true`일 때 추가합니다. World에 직접 붙은 배경 geom도 각각 분리해 캐시합니다.
 Cabinet barrier와 PushCube wall은 reward/종료 판정에 관련되지만 바닥·벽 필터를 우선합니다.
 완전히 투명한 형상은 포함하지 않습니다. 기존 `table|none` map 설정은 지원하지 않습니다.
@@ -139,8 +140,9 @@ Aero는 `tetheria_mount`가 기준입니다. Aloha는 양팔 base 위치의 중�
 보장하며, 이후 범위를 벗어나도 clipping하지 않습니다. Normal은 robot-frame 단위벡터입니다.
 
 Point Transformer는 기존 SERF-VLA 기반 구조를 Flax로 이식했습니다.
-DINO projection 1024→64, 두 stage(폭 64/128, 대표점 최대 256/64), 이웃 16개,
-마지막 전체 대표점 attention과 256차원 token 하나를 사용합니다.
+DINO projection 1024→64, 두 stage(폭 64/128, 대표점 최대 256/64)를 사용합니다.
+마지막 블록을 포함한 모든 Point Transformer의 이웃 수는 16개이며,
+전체 대표점의 attention pooling으로 256차원 token 하나를 만듭니다.
 Actor·critic 가중치는 분리합니다. Positional MLP는 7D edge feature
 `[d, ||d||, ni·nj, ni·unit(d), nj·unit(d)]`를 받고 attention과 value/message 양쪽에 사용합니다.
 여기서 `d=xyz_j-xyz_i`이며 절대좌표·body ID·정규화 중심·스케일을 학습 feature로 넣지 않습니다.
@@ -161,7 +163,8 @@ python -m benchmark.rl.train --env-id PandaRobotiqPushCube --obs-mode map
 python -m benchmark.rl.train --help
 ```
 
-State는 공식 task별 PPO hyperparameter와 학습량을 기본값으로 사용합니다.
+State/RGB/Map 모두 PPO update epochs 기본값은 4(`num_updates_per_batch=4`)입니다.
+State의 나머지 hyperparameter와 학습량은 공식 task별 PPO 설정을 사용합니다.
 RGB는 동일한 state 학습량과 PPO 설정에 CNN을 결합하고 환경 수 128, 평가 환경 수 8,
 `batch_size=16`, 관측 정규화 비활성화를 적용합니다.
 Map도 해당 task의 state PPO 설정을 사용하되 환경 수 8, 평가 환경 수 8,
@@ -246,6 +249,27 @@ python -m util.view_scene --help
 재생은 CPU MuJoCo에서 현재 actuator control을 유지하는 scene 검사이며, Playground의 action/reward loop나
 학습 policy 평가가 아닙니다. Reset은 최초의 task reset 상태를 복원합니다.
 원격 머신에서는 `ssh -L 8080:127.0.0.1:8080 <host>`로 접속할 수 있습니다.
+
+모든 task의 실제 Point Transformer 입력을 한 번에 내보내려면:
+
+```bash
+python -m util.export_map_inputs --output reports/map-input-pca
+# 추출 없이 저장된 입력으로 HTML/PNG만 다시 생성
+python -m util.export_map_inputs --output reports/map-input-pca --render-only
+```
+
+기본값은 10개 task × `full`/`gripper`, `background=false`, seed 0이며 학습과 같은 2cm map cache를 사용합니다.
+누락된 cache는 기본 96개 시점과 최대 512개 보충 시점으로 생성합니다.
+`index.html`은 인터넷 없이 열 수 있는 3D viewer입니다. Task·로봇 입력·XYZ/PCA 공간을 전환하고,
+부품을 표시/숨기며 점 수를 확인할 수 있습니다. 입력점을 추가로 줄이지 않습니다.
+Reset 직후와 zero action으로 첫 step을 수행한 실제 입력도 비교합니다.
+Native reset의 body pose와 qpos 기반 MuJoCo FK가 다르면 해당 오차를 표시하며,
+시각화에서 좌표를 임의로 보정하지 않습니다. PNG는 첫 step 이후 관측을 보여줍니다.
+`all_tasks_full.png`, `all_tasks_gripper.png`, task별 PNG/NPZ와 구성요소·cache 경로를 기록한
+`manifest.json`도 저장합니다. 좌표는 현재 mocap pose, robot frame, episode별 정규화를 반영하는 실제 map observation이며,
+NPZ에는 normal, 정규화 중심·스케일과 `geometry_epsilon`도 함께 저장합니다.
+색상은 학습 projection 이전의 frozen DINO 1024차원 특징을 task/모드별 PCA로 변환한 값입니다.
+다른 task/모드 사이의 PCA 색상은 직접 비교하지 않습니다.
 
 mjlab 적용 검토는 [util/mjlab-assessment.md](util/mjlab-assessment.md)에 정리했습니다.
 

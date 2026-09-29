@@ -59,7 +59,7 @@ def parser():
     p.add_argument("--map-robot", choices=("full", "gripper"),
                    help="Robot visual parts: whole robot or manipulation hand/gripper")
     p.add_argument("--map-background", choices=("true", "false"),
-                   help="Include task-unrelated scene objects; floors/walls are always excluded")
+                   help="Include task-unrelated scene objects; floors/walls/Aloha tables are always excluded")
     p.add_argument("--map-cache")
     p.add_argument("--map-views", type=int)
     p.add_argument("--map-extra-views", type=int)
@@ -124,8 +124,9 @@ def train(args):
         if args.map_views < 1 or args.map_extra_views < 0:
             raise ValueError("Map views must be positive and extra views nonnegative")
         from benchmark.common.dino import dino_config
+        from benchmark.common.mapping import DEFAULT_VOXEL_SIZE
         config["map"] = {"robot": args.map_robot, "background": args.map_background == "true",
-                         "voxel_size": .015, "views": args.map_views, "extra_views": args.map_extra_views,
+                         "voxel_size": DEFAULT_VOXEL_SIZE, "views": args.map_views, "extra_views": args.map_extra_views,
                          "cache": str(Path(args.map_cache).expanduser().resolve()),
                          "dino": dino_config(args.dino_source, args.dino_weights)}
     env = make_env(config, params["num_envs"])

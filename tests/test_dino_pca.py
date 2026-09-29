@@ -5,12 +5,16 @@ import pytest
 
 
 def test_pca_colors_follow_principal_axes_and_preserve_equal_features():
-    from util.dino_pca import pca_colors
+    from util.dino_pca import pca_colors, pca_embedding
 
     # Orthogonal, unequal-variance factors, mixed into correlated features.
     factors = np.array([[a, b, c] for a in (-4., 4.) for b in (-2., 2.) for c in (-1., 1.)])
     mixing = np.array([[1., 1., 0., 0.], [-1., 1., 0., 0.], [0., 0., 1., 1.]]) / np.sqrt(2)
     features = factors @ mixing + np.array([17., -3., 9., 2.])
+    scores, _, ratios = pca_embedding(features)
+    np.testing.assert_allclose(scores.mean(0), 0, atol=1e-12)
+    np.testing.assert_allclose(ratios, np.array([16., 4., 1.]) / 21)
+    np.testing.assert_allclose(np.var(scores, axis=0), [16., 4., 1.])
     colors = pca_colors(np.concatenate([features, features]))
     assert colors.dtype == np.uint8
     assert colors.shape == (16, 3)

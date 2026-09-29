@@ -10,7 +10,7 @@ import mujoco
 import numpy as np
 
 from benchmark.common.envs import DEFAULT_TASK, TASKS, env_config, make_env
-from benchmark.common.mapping import components
+from benchmark.common.mapping import DEFAULT_VOXEL_SIZE, components
 
 
 def load_scene(env_id, seed=0, map_only=False, background=False, robot="full", *, env=None):
@@ -75,7 +75,7 @@ def main():
         from util.dino_pca import PCAView, pca_colors
 
         config = {"robot": args.map_robot, "background": args.map_background == "true",
-                  "voxel_size": .015, "views": args.map_views, "extra_views": args.map_extra_views,
+                  "voxel_size": DEFAULT_VOXEL_SIZE, "views": args.map_views, "extra_views": args.map_extra_views,
                   "cache": str(Path(args.map_cache).expanduser().resolve()),
                   "dino": dino_config(args.dino_source, args.dino_weights)}
         env = make_env(env_config(args.env_id))

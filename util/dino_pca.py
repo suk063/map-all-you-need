@@ -3,13 +3,15 @@
 import numpy as np
 
 
-def pca_colors(features):
-    """Map the first three centered PCs to RGB, fitting once for the whole scene."""
+def pca_embedding(features):
+    """Return three centered PC scores, percentile-scaled RGB, and variance ratios."""
     features = np.asarray(features, dtype=np.float64)
     if features.ndim != 2 or min(features.shape) < 1 or not np.isfinite(features).all():
         raise ValueError("PCA features must be a nonempty, finite (points, channels) array")
     centered = features - features.mean(axis=0)
     colors = np.full((len(features), 3), .5)
+    scores = np.zeros((len(features), 3))
+    ratios = np.zeros(3)
     # The covariance matrix is only 1024 x 1024 for DINOv3 ViT-L, independent
     # of scene size. Do not compute the much larger left singular vectors.
     values, vectors = np.linalg.eigh(centered.T @ centered)
@@ -20,10 +22,17 @@ def pca_colors(features):
         axis = vectors[:, index]
         axis = axis * (1 if axis[np.argmax(np.abs(axis))] >= 0 else -1)
         projected = centered @ axis
+        scores[:, channel] = projected
+        ratios[channel] = values[index] / np.maximum(values, 0).sum()
         low, high = np.percentile(projected, (2, 98))
         if high > low:
             colors[:, channel] = np.clip((projected - low) / (high - low), 0, 1)
-    return np.rint(colors * 255).astype(np.uint8)
+    return scores, np.rint(colors * 255).astype(np.uint8), ratios
+
+
+def pca_colors(features):
+    """Map the first three centered PCs to RGB, fitting once for the whole scene."""
+    return pca_embedding(features)[1]
 
 
 class PCAView:

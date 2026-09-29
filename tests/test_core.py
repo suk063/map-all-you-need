@@ -47,7 +47,9 @@ def test_native_configs_and_removed_modes(monkeypatch):
         config = env_config(task, "state")
         assert config["goal_markers"] == "task"
         assert config["environment"] == manipulation.get_default_config(task).to_dict()
-        assert ppo_config(config) == manipulation_params.brax_ppo_config(task, config["environment"].get("impl")).to_dict()
+        expected = manipulation_params.brax_ppo_config(task, config["environment"].get("impl")).to_dict()
+        expected['num_updates_per_batch'] = 4
+        assert ppo_config(config) == expected
     for mode in ("rgbd", "dino"):
         with pytest.raises(ValueError, match="Unsupported"):
             env_config(DEFAULT_TASK, mode)
@@ -60,6 +62,7 @@ def test_native_configs_and_removed_modes(monkeypatch):
         assert rgb['rgb']['use_textures']
         expected = manipulation_params.brax_ppo_config(task, native['environment'].get('impl')).to_dict()
         expected.update(num_envs=128, num_eval_envs=8, batch_size=16, normalize_observations=False)
+        expected['num_updates_per_batch'] = 4
         expected['network_factory'] = manipulation_params.brax_vision_ppo_config(DEFAULT_TASK).network_factory.to_dict()
         assert ppo_config(rgb) == expected
     for flag in ("--control-mode", "--view", "--state-input"):
@@ -93,6 +96,7 @@ def test_native_configs_and_removed_modes(monkeypatch):
     with pytest.raises(ValueError, match='different goal visibility'):
         make_env({**rgb, 'goal_markers': True})
     params = ppo_config(env_config(DEFAULT_TASK, "map"))
+    assert params['num_updates_per_batch'] == 4
     assert (params["num_envs"], params["batch_size"], params["normalize_observations"]) == (8, 1, False)
 
 

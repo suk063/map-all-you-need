@@ -63,6 +63,7 @@ def env_config(env_id=DEFAULT_TASK, obs_mode="state", impl=None):
 
 def ppo_config(config):
     params = manipulation_params.brax_ppo_config(config["env_id"], config["environment"].get("impl")).to_dict()
+    params["num_updates_per_batch"] = 4
     if config['obs_mode'] == 'rgb':
         params.update(num_envs=128, num_eval_envs=8, batch_size=16, normalize_observations=False)
         params['network_factory'] = manipulation_params.brax_vision_ppo_config(DEFAULT_TASK).network_factory.to_dict()

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Point Transformer · Input PCA</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#1b293e;background:#f5f7fb;font-size:14px}
+*{box-sizing:border-box}body{margin:0}header{padding:22px 28px 16px;background:white;border-bottom:1px solid #dbe2eb}
+h1{font-size:25px;letter-spacing:-.7px;margin:3px 0 8px}.eyebrow{font-size:11px;letter-spacing:1.8px;color:#546784}p{margin:5px 0;line-height:1.65;color:#55647a}
+.toolbar{display:flex;flex-wrap:wrap;align-items:end;gap:16px;padding:16px 28px;background:white;border-bottom:1px solid #dbe2eb}
+label.control{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#52647d}select,button{font:inherit;border:1px solid #bfcddd;background:white;border-radius:5px;padding:8px 10px;color:#203653}button{cursor:pointer}button:hover{background:#eaf0fa}input[type=range]{width:100px}
+main{display:grid;grid-template-columns:minmax(0,1fr) 340px;min-height:580px}.plot-pane{min-width:0;padding:12px}#plot{height:58vh;min-height:390px;max-height:850px}
+.stats{display:flex;gap:24px;padding:10px 18px 0}.stat{font-size:13px;color:#5a6b81}.stat strong{display:block;font-size:26px;line-height:1.4;color:#142b48;font-variant-numeric:tabular-nums}.hint{font-size:12px;padding:0 18px}
+aside{background:white;border-left:1px solid #dbe2eb;padding:18px 16px;overflow:auto}h2{font-size:15px;margin:0 0 9px}.row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;gap:6px;padding:7px 0;border-bottom:1px solid #edf0f5;cursor:pointer}.row span.name{overflow-wrap:anywhere;font-size:12px}.row small{display:block;color:#718299;font-size:10px}.row span.count{font-variant-numeric:tabular-nums;font-size:12px;color:#52667f}.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:#61728a;margin:14px 0}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}.actions{display:flex;gap:8px;margin-bottom:10px}.actions button{font-size:11px;padding:5px 8px}
+footer{border-top:1px solid #dbe2eb;background:white;padding:18px 28px;font-size:12px;color:#64748b;line-height:1.8}a{color:#2256a5}.status{font-size:12px;color:#60738e}#error{color:#9c2635}
+@media(max-width:850px){main{grid-template-columns:1fr}aside{border-left:none;border-top:1px solid #dbe2eb}#plot{min-height:420px;height:65vh}.toolbar{padding:14px 18px;gap:12px}header{padding:18px}.stats{gap:18px}.stat strong{font-size:22px}}
+</style>
+<script>/*__PLOTLY__*/</script>
+</head>
+<body>
+<header><div class="eyebrow">MAP POLICY / OBSERVATION AUDIT</div><h1>Point Transformer 입력 · DINO PCA</h1><p>실제 입력점 전체를 표시합니다. 3D 좌표와 DINO 특징의 PCA 공간을 전환하며 task별 입력을 확인하세요.</p><div class="status" id="settings"></div></header>
+<div class="toolbar">
+<label class="control">Task<select id="task"></select></label>
+<label class="control">로봇 입력<select id="robot"></select></label>
+<label class="control">관측 시점<select id="phase"><option value="step">첫 step 이후 · action=0</option><option value="reset">reset 직후</option></select></label>
+<label class="control">좌표 공간<select id="space"><option value="xyz">3D geometry · world XYZ</option><option value="scores">DINO feature · PC1 / PC2 / PC3</option></select></label>
+<label class="control">색상<select id="color"><option value="pca">DINO PCA → RGB</option><option value="category">구성요소 종류</option></select></label>
+<label class="control">점 크기<input id="size" type="range" min="1" max="8" step=".5" value="3"></label>
+<button id="reset">시점 초기화</button><span id="error"></span>
+</div>
+<main><div class="plot-pane"><div class="stats"><div class="stat"><strong id="point-count"></strong>input points</div><div class="stat"><strong id="part-count"></strong>components</div><div class="stat"><strong id="variance"></strong>PC1–3 explained variance</div></div><p class="hint" id="pose-note"></p><div id="plot"></div><p class="hint">드래그: 회전 · 스크롤: 확대/축소 · Shift+드래그: 이동. Hover로 body·point ID·feature ID를 확인할 수 있습니다.</p></div>
+<aside><h2>입력 구성요소</h2><p style="font-size:12px">체크박스는 표시만 바꿉니다. 저장된 입력에는 모든 점이 포함됩니다.</p><div class="legend"><span><i class="dot" style="background:#376be5"></i>robot</span><span><i class="dot" style="background:#ec7435"></i>object</span><span><i class="dot" style="background:#17a480"></i>goal</span><span><i class="dot" style="background:#9263c6"></i>background</span></div><div class="actions"><button id="show-all">전체 표시</button><button id="objects">물체·goal만 표시</button></div><div id="parts"></div><p id="visible-count" class="status"></p></aside></main>
+<footer><strong>해석 방법</strong> · 색상은 원본 texture나 학습된 policy activation이 아닙니다. Frozen DINOv3 ViT-L/16의 1024차원 입력 특징에 PCA를 적용한 것입니다. PC1/2/3을 R/G/B로 대응시키고 각 채널의 2–98 백분위로 색상만 정규화했습니다. PCA 공간의 좌표는 정규화 전 score입니다.<br>각 task·robot 모드에서 PCA를 따로 계산하므로 서로 다른 화면의 같은 색이 같은 의미를 보장하지 않습니다. 숨긴 부품이나 관측 시점이 바뀌어도 PCA 기준은 유지됩니다. 동일 seed의 reset 직후와 zero action으로 한 번 step한 실제 관측을 비교합니다. 학습된 policy rollout은 아닙니다.<br><span id="table-note"></span> 데이터: <a href="manifest.json">manifest</a> · <a id="array-link">현재 입력 NPZ</a> · <a id="image-link">현재 PNG (첫 step)</a> · <a id="full-gallery" href="all_tasks_full.png">전체 로봇 모음</a> · <a id="gripper-gallery" href="all_tasks_gripper.png">조작부 모음</a></footer>
+<script>
+const report=/*__DATA__*/;
+const $=id=>document.getElementById(id), fmt=n=>n.toLocaleString(), categories={robot:'#376be5',object:'#ec7435',goal:'#17a480',background:'#9263c6'};
+const taskNames=[...new Set(report.variants.map(v=>v.task))], modes=[...new Set(report.variants.map(v=>v.robot))];
+for(const name of taskNames)$('task').add(new Option(name,name));
+for(const mode of modes)$('robot').add(new Option(mode==='full'?'full · 전체 로봇':'gripper · 조작부',mode));
+['full','gripper'].forEach(mode=>{$(`${mode}-gallery`).hidden=!modes.includes(mode)});
+const settings=report.manifest.map_settings;
+const normalized=report.manifest.coordinate_frame==='normalized_robot';
+$('space').options[0].textContent=normalized?'3D geometry · normalized robot XYZ':'3D geometry · world XYZ';
+$('settings').textContent=`${taskNames.length} tasks · seed=${report.manifest.seed} · background=${settings.background} · voxel=${settings.voxel_size*100} cm · ${settings.views} 기본 시점 + 최대 ${settings.extra_views} 보충 시점 · 시각화용 추가 downsampling 없음`;
+$('table-note').textContent='Aloha 상판·다리는 map 입력에서 제외되어 있습니다. 물리 테이블과 reward는 유지합니다.';
+let current, shown=[], revision=0;
+const camera={eye:{x:1.3,y:-1.8,z:1.05},up:{x:0,y:0,z:1}};
+function visibleCount(){let n=0;current.parts.forEach((p,i)=>{if(shown[i])n+=p.points});$('visible-count').textContent=`표시 중 ${fmt(n)} / ${fmt(current.points)} points`;}
+function buildParts(){
+ $('parts').replaceChildren();
+ current.parts.forEach((part,i)=>{
+  const row=document.createElement('label');row.className='row';
+  const check=document.createElement('input');check.type='checkbox';check.checked=shown[i];check.dataset.index=i;
+  check.addEventListener('change',()=>{shown[i]=check.checked;Plotly.restyle('plot',{visible:check.checked},[i]);visibleCount()});
+  const name=document.createElement('span');name.className='name';name.textContent=part.name;
+  const category=document.createElement('small');category.textContent=part.category;category.style.color=categories[part.category];name.append(category);
+  const count=document.createElement('span');count.className='count';count.textContent=fmt(part.points);
+  row.append(check,name,count);$('parts').append(row);
+ });visibleCount();
+}
+async function draw(resetCamera=false){
+ try{
+  const selected=report.variants.find(v=>v.task===$('task').value&&v.robot===$('robot').value);
+  if(!selected){$('error').textContent='선택한 조합의 데이터가 없습니다.';return}
+  const changed=selected!==current;current=selected;if(changed){shown=current.parts.map(()=>true);buildParts()}
+  $('point-count').textContent=fmt(current.points);$('part-count').textContent=current.parts.length;
+  $('variance').textContent=(100*current.variance_ratio.reduce((a,b)=>a+b,0)).toFixed(1)+'%';
+  $('array-link').href=current.npz;$('image-link').href=current.npz.replace('.npz','.png');
+  const space=$('space').value, isReset=$('phase').value==='reset', isXYZ=space==='xyz';
+  const coordinates=current[isXYZ&&isReset?'reset_xyz':space];
+  $('pose-note').textContent=isReset?`실제 reset 입력. qpos 기반 MuJoCo FK와 body 위치 최대 차이 ${current.reset_body_pose_max_error_m.toFixed(3)} m (goal 제외).`:`실제 첫 step 입력 · action=0 · t=${current.step_time_seconds.toFixed(3)} s. reset 직후 입력과 비교할 수 있습니다.`;
+  $('pose-note').style.color=isReset&&current.reset_body_pose_max_error_m>1e-4?'#b53b32':'#60738e';
+  const traces=current.parts.map((part,i)=>{
+   const indices=[];current.part_ids.forEach((p,j)=>{if(p===i)indices.push(j)});
+   return {type:'scatter3d',mode:'markers',name:part.name,visible:shown[i],showlegend:false,
+    x:indices.map(j=>coordinates[j][0]),y:indices.map(j=>coordinates[j][1]),z:indices.map(j=>coordinates[j][2]),
+    customdata:indices.map(j=>[j,current.feature_ids[j]]),
+    marker:{size:Number($('size').value),opacity:1,color:$('color').value==='pca'?indices.map(j=>`rgb(${current.colors[j].join(',')})`):categories[part.category],line:{width:0}},
+    hovertemplate:`${part.name}<br>point %{customdata[0]} · feature %{customdata[1]}<br>${isXYZ?'x':'PC1'}: %{x:.4f}<br>${isXYZ?'y':'PC2'}: %{y:.4f}<br>${isXYZ?'z':'PC3'}: %{z:.4f}<extra></extra>`};
+  });
+  if(resetCamera||changed)revision++;
+  const axis=title=>({title:{text:title,font:{size:12}},backgroundcolor:'#eef2f8',gridcolor:'#d5deec',showbackground:true,zerolinecolor:'#aabbd2',tickfont:{size:10}});
+  const units=normalized?'normalized':'m';
+  const layout={margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#f5f7fb',font:{family:'system-ui',color:'#425773'},
+   uirevision:revision,scene:{camera,aspectmode:'data',xaxis:axis(isXYZ?`x (${units})`:'PC1'),yaxis:axis(isXYZ?`y (${units})`:'PC2'),zaxis:axis(isXYZ?`z (${units})`:'PC3')},hoverlabel:{font:{family:'system-ui',size:12}}};
+  await Plotly.react('plot',traces,layout,{responsive:true,displaylogo:false,toImageButtonOptions:{format:'png',filename:`${current.task}_${current.robot}_${space}`,width:1600,height:1200,scale:1}});
+  visibleCount();$('error').textContent='';
+ }catch(err){$('error').textContent=String(err);console.error(err)}
+}
+['task','robot'].forEach(id=>$(id).addEventListener('change',()=>draw(true)));
+$('space').addEventListener('change',()=>draw(true));$('phase').addEventListener('change',()=>draw(true));$('color').addEventListener('change',()=>draw());$('size').addEventListener('input',()=>draw());$('reset').addEventListener('click',()=>draw(true));
+function filterParts(onlyObjects){shown=current.parts.map(p=>!onlyObjects||p.category==='object'||p.category==='goal');buildParts();draw()}
+$('show-all').addEventListener('click',()=>filterParts(false));$('objects').addEventListener('click',()=>filterParts(true));
+draw(true);
+</script>
+</body>
+</html>

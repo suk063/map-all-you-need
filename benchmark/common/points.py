@@ -150,7 +150,7 @@ class MapEncoder(nn.Module):
         for i, (width, limit) in enumerate(((64, 256), (128, 64))):
             xyz, normals, x, valid = TransitionDown(width, limit, name=f"down_{i}")(xyz, normals, x, valid)
             x = PointBlock(width, name=f"block_{i}")(xyz, normals, x, valid, epsilon)
-        x = PointBlock(128, neighbors=64, name="global_block")(xyz, normals, x, valid, epsilon)
+        x = PointBlock(128, neighbors=16, name="global_block")(xyz, normals, x, valid, epsilon)
         scores = Dense(1, name="score")(x).squeeze(-1)
         scores = jnp.where(valid, scores, -jnp.finfo(scores.dtype).max)
         pooled = (x * jax.nn.softmax(scores, axis=1)[..., None]).sum(1)

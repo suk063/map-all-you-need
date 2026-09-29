@@ -6,3 +6,6 @@ trimesh==5.1.0
 mjviser @ git+https://github.com/mujocolab/mjviser.git@bb5b5afe31440d21e7ad08688df948bf756319ba
 viser==1.1.1
 Pillow==12.3.0
+# Offline all-task point-cloud reports.
+matplotlib==3.11.2
+plotly==6.0.0

@@ -21,6 +21,7 @@ from benchmark.common.geometry import EPSILON_M, geometry_config, scene_bounds
 
 MAP_VERSION = 3
 IMAGE_SIZE = 256
+DEFAULT_VOXEL_SIZE = .02
 # Explicit robot roots keep static scene furniture out of the observation.
 ROBOT_ROOTS = {
     "Panda": ("link0",),
@@ -89,9 +90,11 @@ def components(model, env_id, config):
         if any(word in label for word in ("floor", "ground", "wall", "barrier")):
             continue
         tabletop = "tabletop" in label or label.strip() == "table"
-        # Aloha's tabletop is used by its no_table_collision reward.
-        task_surface = family == "Aloha" and tabletop
-        if body not in required and not task_surface and not config["background"]:
+        # Exclude the complete Aloha table from observations, even with
+        # background enabled. Its physical geometry and rewards are unchanged.
+        if family == "Aloha" and (tabletop or "tablelegs" in label):
+            continue
+        if body not in required and not config["background"]:
             continue
         # World geoms can be separate furniture pieces, not one giant object.
         groups.setdefault((body, geom if body == 0 else -1, tabletop), []).append(geom)
