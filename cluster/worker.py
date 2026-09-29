@@ -169,6 +169,7 @@ def execute(spec):
             if remaining:
                 raise RuntimeError('Training exited before the target was durably checkpointed')
             write_json(output / 'trained.json', {'target_timesteps': target, 'saved_steps': steps})
+            print(json.dumps({'event': 'trained', 'steps': steps}), flush=True)
             run_command([sys.executable, '-m', 'benchmark.eval', '--checkpoint', str(output),
                          '--episodes', str(cfg['eval_episodes']), '--num-envs', '8', '--seed', '10000'],
                         output, 'evaluate', log)

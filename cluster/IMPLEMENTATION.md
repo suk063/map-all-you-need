@@ -15,9 +15,16 @@ viewer, enable native RGB textures, and merge the verified implementation into m
 - [x] Add image, documentation and regression/smoke tests.
 - [x] Mac Python 3.9 operational tests, manifest client dry-run, actual agent JSON decision,
   actual PVC → Mac transfer/checksum, shell syntax and Ruff.
-- [ ] Finish real A6000 environment, 30-combination learning and resume checks.
-- [ ] Verify textured RGB and task-specific goals after integrating current main.
-- [ ] Merge the verified implementation into main.
+- [x] Pass all 30 baseline task/policy PPO smoke tests on A6000.
+- [x] Verify actual textured observations and all 10 RGB PPO combinations after integrating main.
+- [x] Finish affected map PPO and checkpoint continuation checks on current main: 51/51 GPU cases.
+- [x] Integrate latest main into the verified branch before merging back.
+
+Validation: 30 Mac operational tests; 41 core/checkpoint/PCA tests and 11 subtests
+(one optional viewer test skipped); all 30 baseline PPO combinations; 51 focused
+GPU cases after main integration. Actual eval-only recovery and PVC → Mac download
+verified 42 files by SHA-256. GPU PPO tests use small environment counts and short
+training budgets; sustained 128-environment RGB memory/throughput was not measured.
 
 The Mac has no Docker; the image has not been built/pushed. The temporary GPU pod
 uses the same pinned setup script as the Dockerfile. Production submission always

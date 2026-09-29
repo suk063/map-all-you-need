@@ -44,6 +44,8 @@ tail -f runs/cluster/RUN_ID/monitor.log
 검증 실패 시 본 학습 제출을 보류한다. 검증 Job은 30개 본 학습 Job과 별도다.
 Warp/JAX/PyTorch의 GPU 메모리가 긴 테스트 세션에 누적되지 않도록
 각 검증 case를 별도 Python 프로세스로 실행하고 종료 시 메모리를 회수한다.
+Smoke test는 작은 환경 수와 학습량으로 기능을 검증한다. 기본 RGB 128개 환경의
+장시간 메모리 사용량이나 처리량까지 보장하는 성능 검증은 아니다.
 
 현재 cluster 기본값: `nautilus / erl-ucsd`, PVC `sh-mapping`,
 RTX A6000 1개(`nvidia.com/rtxa6000`), CPU 8, RAM 32Gi. 요청과 limit은 같다.
