@@ -1,0 +1,8 @@
+# Optional viewer dependencies; keep shared packages aligned with ../requirements.txt.
+mujoco==3.14.0
+numpy==2.5.3
+trimesh==5.1.0
+# Before the SDF/NumPy enum-membership regression in ae0b219.
+mjviser @ git+https://github.com/mujocolab/mjviser.git@bb5b5afe31440d21e7ad08688df948bf756319ba
+viser==1.1.1
+Pillow==12.3.0

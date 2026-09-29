@@ -1,115 +1,138 @@
-"""Compact relative-only Point Transformer, adapted from SERF-VLA (MIT).
+"""Flax port of the relative-only SERF-VLA Point Transformer.
 
-Reference: ExistentialRobotics/SERF-VLA, commit ea27b7aa753cf7da6def975846ccb5d3180e46f7,
-src/serf_b1k/models/point_transformer_local.py. See THIRD_PARTY_NOTICES.md.
-Coordinates are used only for sampling, neighbours and relative position encoding.
+The relative Point Transformer in `benchmark/common/points.py` is adapted from
+`ExistentialRobotics/SERF-VLA`, commit `ea27b7aa753cf7da6def975846ccb5d3180e46f7`,
+`src/serf_b1k/models/point_transformer_local.py`.
+
+MIT License
+
+Copyright (c) 2026 Byeonghyun Pak
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
 
-import torch
-from torch import nn
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+from flax import linen as nn
+
+Dense = partial(nn.Dense, precision=jax.lax.Precision.HIGHEST)
 
 
 def gather(x, ids):
-    batch = torch.arange(x.shape[0], device=x.device).view(-1, *([1] * (ids.ndim - 1)))
-    return x[batch, ids]
+    return jax.vmap(lambda a, i: a[i])(x, ids)
 
 
 def sampling_coordinates(xyz, origin):
-    # A 0.1 mm relative grid stabilizes equal-distance ties on planar surfaces after
-    # float32 translations. Attention still uses the original metre-valued offsets.
-    return ((xyz - origin) * 10000).round()
+    return jnp.round((xyz - origin) * 10000)
 
 
-@torch.no_grad()
 def fps(xyz, valid, limit):
     xyz = sampling_coordinates(xyz, xyz[:, :1])
-    count = valid.sum(1)
-    size = min(limit, int(count.max()))
-    ids = torch.empty(xyz.shape[0], size, device=xyz.device, dtype=torch.long)
-    distance = torch.full(valid.shape, float("inf"), device=xyz.device)
-    farthest = valid.long().argmax(1)
-    for i in range(size):
-        ids[:, i] = farthest
+    size = min(limit, xyz.shape[1])
+    first = jnp.argmax(valid, axis=1)
+
+    def select(carry, _):
+        distance, farthest = carry
         center = gather(xyz, farthest[:, None])
-        distance = torch.minimum(distance, ((xyz - center) ** 2).sum(-1))
-        farthest = distance.masked_fill(~valid, -1).argmax(1)
-    return ids, torch.arange(size, device=xyz.device)[None] < count[:, None]
+        distance = jnp.minimum(distance, jnp.sum((xyz - center) ** 2, axis=-1))
+        next_id = jnp.argmax(jnp.where(valid, distance, -1), axis=1)
+        return (distance, next_id), farthest
+
+    _, ids = jax.lax.scan(select, (jnp.full(valid.shape, jnp.inf), first), None, length=size)
+    return ids.T, jnp.arange(size)[None] < valid.sum(1)[:, None]
 
 
 def knn(xyz, centers, valid, k):
     origin = xyz[:, :1]
-    xyz, centers = sampling_coordinates(xyz, origin), sampling_coordinates(centers, origin)
+    xyz = sampling_coordinates(xyz, origin)
+    centers = sampling_coordinates(centers, origin)
     k = min(k, xyz.shape[1])
-    indices = []
-    # Direct differences avoid loss of translation invariance from x²+y²-2xy.
-    for block in centers.split(32, dim=1):
-        distance = ((block[:, :, None] - xyz[:, None]) ** 2).sum(-1)
-        indices.append(distance.masked_fill(~valid[:, None], float("inf")).topk(k, largest=False).indices)
-    return torch.cat(indices, dim=1)
+
+    def neighbors(center):
+        distance = jnp.sum((center[:, None] - xyz) ** 2, axis=-1)
+        return jax.lax.top_k(-jnp.where(valid, distance, jnp.inf), k)[1]
+
+    # Bound temporary distance storage without changing the input point set.
+    return jax.lax.map(neighbors, centers.swapaxes(0, 1), batch_size=32).swapaxes(0, 1)
 
 
 class PointBlock(nn.Module):
-    def __init__(self, width, neighbors=16):
-        super().__init__()
-        self.neighbors, self.share = neighbors, 8
-        self.before = nn.Sequential(nn.Linear(width, width, bias=False), nn.RMSNorm(width, eps=1e-6), nn.ReLU())
-        self.qkv = nn.Linear(width, 3 * width)
-        self.position = nn.Sequential(nn.Linear(3, width), nn.RMSNorm(width, eps=1e-6), nn.ReLU(), nn.Linear(width, width))
-        self.weight = nn.Sequential(nn.RMSNorm(width, eps=1e-6), nn.ReLU(), nn.Linear(width, width // 8),
-                                    nn.RMSNorm(width // 8, eps=1e-6), nn.ReLU(), nn.Linear(width // 8, width // 8))
-        self.after = nn.Sequential(nn.RMSNorm(width, eps=1e-6), nn.ReLU(), nn.Linear(width, width, bias=False), nn.RMSNorm(width, eps=1e-6))
+    width: int
+    neighbors: int = 16
 
-    def forward(self, xyz, features, valid):
-        q, k, v = self.qkv(self.before(features)).chunk(3, dim=-1)
+    @nn.compact
+    def __call__(self, xyz, features, valid):
+        x = Dense(self.width, use_bias=False, name="before_dense")(features)
+        x = nn.relu(nn.RMSNorm(epsilon=1e-6, name="before_norm")(x))
+        q, k, v = jnp.split(Dense(3 * self.width, name="qkv")(x), 3, axis=-1)
         ids = knn(xyz, xyz, valid, self.neighbors)
-        delta = self.position(gather(xyz, ids) - xyz[:, :, None])
-        scores = self.weight(gather(k, ids) - q[:, :, None] + delta)
-        scores = scores.masked_fill(~gather(valid, ids)[..., None], -torch.finfo(scores.dtype).max)
-        content = (gather(v, ids) + delta).unflatten(-1, (self.share, -1))
-        x = (scores.softmax(2)[..., None, :] * content).sum(2).flatten(-2)
-        return (features + self.after(x)).relu() * valid[..., None]
+        delta = Dense(self.width, name="position_in")(gather(xyz, ids) - xyz[:, :, None])
+        delta = nn.relu(nn.RMSNorm(epsilon=1e-6, name="position_norm")(delta))
+        delta = Dense(self.width, name="position_out")(delta)
+        scores = nn.relu(nn.RMSNorm(epsilon=1e-6, name="weight_norm1")(gather(k, ids) - q[:, :, None] + delta))
+        scores = Dense(self.width // 8, name="weight_in")(scores)
+        scores = nn.relu(nn.RMSNorm(epsilon=1e-6, name="weight_norm2")(scores))
+        scores = Dense(self.width // 8, name="weight_out")(scores)
+        scores = jnp.where(gather(valid, ids)[..., None], scores, -jnp.finfo(scores.dtype).max)
+        content = gather(v, ids) + delta
+        content = content.reshape(*content.shape[:-1], 8, self.width // 8)
+        x = (jax.nn.softmax(scores, axis=2)[..., None, :] * content).sum(2).reshape(features.shape)
+        x = nn.relu(nn.RMSNorm(epsilon=1e-6, name="after_norm1")(x))
+        x = Dense(self.width, use_bias=False, name="after_dense")(x)
+        x = nn.RMSNorm(epsilon=1e-6, name="after_norm2")(x)
+        return nn.relu(features + x) * valid[..., None]
 
 
 class TransitionDown(nn.Module):
-    def __init__(self, input_dim, width, limit):
-        super().__init__()
-        self.limit = limit
-        self.project = nn.Sequential(nn.Linear(input_dim + 3, width, bias=False), nn.RMSNorm(width, eps=1e-6), nn.ReLU())
+    width: int
+    limit: int
 
-    def forward(self, xyz, features, valid):
+    @nn.compact
+    def __call__(self, xyz, features, valid):
         selected, mask = fps(xyz, valid, self.limit)
         centers = gather(xyz, selected)
         ids = knn(xyz, centers, valid, 16)
         relative = gather(xyz, ids) - centers[:, :, None]
-        x = self.project(torch.cat((relative, gather(features, ids)), dim=-1))
-        x = x.masked_fill(~gather(valid, ids)[..., None], -torch.finfo(x.dtype).max).max(2).values
+        x = Dense(self.width, use_bias=False)(jnp.concatenate((relative, gather(features, ids)), axis=-1))
+        x = nn.relu(nn.RMSNorm(epsilon=1e-6)(x))
+        x = jnp.where(gather(valid, ids)[..., None], x, -jnp.finfo(x.dtype).max).max(2)
         return centers, x * mask[..., None], mask
 
 
 class MapEncoder(nn.Module):
-    output_dim = 256
-
-    def __init__(self, bank):
-        super().__init__()
-        self.bank = bank  # Frozen feature storage, not a learned embedding table.
-        self.input = nn.Linear(1024, 64)
-        self.down = nn.ModuleList([TransitionDown(64, 64, 256), TransitionDown(64, 128, 64)])
-        self.blocks = nn.ModuleList([PointBlock(64), PointBlock(128)])
-        self.global_block = PointBlock(128, neighbors=64)
-        self.score = nn.Linear(128, 1)
-        self.output = nn.Linear(128, 256)
-
-    def forward(self, obs):
-        xyz, ids = obs["xyz"].float(), obs["feature_ids"]
+    @nn.compact
+    def __call__(self, obs, bank):
+        ids = obs["feature_ids"].astype(jnp.int32)
+        batch_shape, count = ids.shape[:-1], ids.shape[-1]
+        ids = ids.reshape(-1, count)
+        xyz = obs["xyz"].reshape(-1, count, 3)
         valid = ids >= 0
-        if not valid.any(1).all():
-            raise ValueError("Map observations must contain at least one observed point per environment")
-        features = self.bank.lookup(ids).float()
-        x = self.input(features)
-        for down, block in zip(self.down, self.blocks):
-            xyz, x, valid = down(xyz, x, valid)
-            x = block(xyz, x, valid)
-        x = self.global_block(xyz, x, valid)
-        weights = self.score(x).squeeze(-1).masked_fill(~valid, -torch.finfo(x.dtype).max).softmax(1)
-        # Exactly one global 256D token per map, returned as the shared encoder vector.
-        return self.output((x * weights[..., None]).sum(1))
+        # Project the immutable bank before gathering, avoiding B*N*1024 storage.
+        projected = Dense(64, name="input")(jax.lax.stop_gradient(bank))
+        x = projected[jnp.maximum(ids, 0)]
+        for i, (width, limit) in enumerate(((64, 256), (128, 64))):
+            xyz, x, valid = TransitionDown(width, limit, name=f"down_{i}")(xyz, x, valid)
+            x = PointBlock(width, name=f"block_{i}")(xyz, x, valid)
+        x = PointBlock(128, neighbors=64, name="global_block")(xyz, x, valid)
+        scores = Dense(1, name="score")(x).squeeze(-1)
+        scores = jnp.where(valid, scores, -jnp.finfo(scores.dtype).max)
+        pooled = (x * jax.nn.softmax(scores, axis=1)[..., None]).sum(1)
+        return Dense(256, name="output")(pooled).reshape(*batch_shape, 256)

@@ -1,286 +1,255 @@
+"""Fast observation/network contracts, independent of robot assets and DINO weights."""
+
+import copy
 import json
+from types import SimpleNamespace
 
 import h5py
+import jax
+import jax.numpy as jnp
+import mujoco
 import numpy as np
 import pytest
-import torch
+import trimesh
+from mujoco_playground import manipulation
+from mujoco_playground.config import manipulation_params
 
-from benchmark.bc.data import DemoDataset, read_metadata
-from benchmark.common.envs import env_config, shared_control_mode
-from benchmark.common.policy import (
-    Policy,
-    load_policy,
-    observation_spec,
-    prepare_observation,
-    save_policy,
+import benchmark  # noqa: F401  Set runtime defaults before importing MuJoCo/JAX.
+from benchmark.common.envs import (
+    DEFAULT_TASK,
+    OBS_MODES,
+    TASKS,
+    env_config,
+    make_env,
+    ppo_config,
 )
-from benchmark.rl.train import compute_gae
+from benchmark.common.mapping import (
+    MAP_VERSION,
+    FeatureBank,
+    IsolatedRenderer,
+    MapObservationWrapper,
+    appearance_key,
+    components,
+    surface_points,
+    visual_mesh,
+)
+from benchmark.common.points import MapEncoder
+from benchmark.common.policy import network_factory
+from benchmark.rl.train import parser
 
 
-@pytest.fixture(autouse=True)
-def limit_threads():
-    torch.set_num_threads(2)
+def test_native_configs_and_removed_modes(monkeypatch):
+    assert set(TASKS) == set(manipulation.ALL_ENVS)
+    assert OBS_MODES == ("state", "rgb", "map")
+    for task in TASKS:
+        config = env_config(task, "state")
+        assert config["environment"] == manipulation.get_default_config(task).to_dict()
+        assert ppo_config(config) == manipulation_params.brax_ppo_config(task, config["environment"].get("impl")).to_dict()
+    for mode in ("rgbd", "dino"):
+        with pytest.raises(ValueError, match="Unsupported"):
+            env_config(DEFAULT_TASK, mode)
+    with pytest.raises(ValueError, match="Official RGB"):
+        env_config("PandaPickCube", "rgb")
+    for flag in ("--control-mode", "--view", "--state-input"):
+        with pytest.raises(SystemExit):
+            parser().parse_args([flag, "x"])
+    assert parser().parse_args([]).map_background == 'false'
+    assert parser().parse_args([]).map_robot == 'full'
+    assert parser().parse_args(['--map-robot', 'gripper']).map_robot == 'gripper'
+    with pytest.raises(SystemExit):
+        parser().parse_args(['--map-robot', 'arm'])
+    assert parser().parse_args(['--map-background', 'true']).map_background == 'true'
+    with pytest.raises(SystemExit):
+        parser().parse_args(['--map-background', 'table'])
+    rgb = env_config(DEFAULT_TASK, "rgb")
+    assert rgb["environment"]["vision"]
+    assert tuple(rgb["environment"]["vision_config"]["cam_res"]) == (64, 64)
+    monkeypatch.setattr('benchmark.common.envs.registry.load', lambda name, config: config)
+    monkeypatch.setattr('benchmark.common.envs.hide_goal_markers', lambda *a, **kw: None)
+    restored = make_env(json.loads(json.dumps(rgb)), num_envs=3)
+    assert restored.vision_config.cam_res == (64, 64)
+    assert restored.vision_config.nworld == 3
+    params = ppo_config(env_config(DEFAULT_TASK, "map"))
+    assert (params["num_envs"], params["batch_size"], params["normalize_observations"]) == (8, 1, False)
 
 
-def test_gae_uses_timeout_value_and_does_not_cross_resets():
-    column = lambda x: torch.tensor(x, dtype=torch.float32)[:, None]
-    advantages, returns = compute_gae(
-        column([1, 100, 5]), column([2, 3, 4]), column([7, 9, 11]),
-        torch.tensor([[False], [True], [False]]),
-        torch.tensor([[True], [False], [False]]), 0.5, 1.0,
-    )
-    torch.testing.assert_close(advantages, column([2.5, 97, 6.5]))
-    torch.testing.assert_close(returns, column([4.5, 100, 10.5]))
+@pytest.fixture(scope="module")
+def points():
+    rng = np.random.default_rng(1)
+    xyz = rng.normal(size=(2, 32, 3)).astype(np.float32)
+    obs = {"xyz": jnp.asarray(xyz.reshape(2, -1)), "feature_ids": jnp.tile(jnp.arange(32), (2, 1))}
+    bank = jnp.asarray(rng.normal(size=(32, 1024)), dtype=jnp.float32)
+    net = MapEncoder()
+    params = net.init(jax.random.PRNGKey(2), obs, bank)
+    return net, params, obs, bank
 
 
-def test_gae_propagates_inside_episode():
-    x = torch.tensor([[1.0], [2.0]])
-    false = torch.zeros_like(x, dtype=torch.bool)
-    advantages, _ = compute_gae(x, x * 0, x * 0, false, false, 0.5, 0.8)
-    torch.testing.assert_close(advantages, torch.tensor([[1.8], [2.0]]))
+def test_point_encoder_invariance_padding_and_gradients(points):
+    net, params, obs, bank = points
+    forward = jax.jit(net.apply)
+    output = forward(params, obs, bank)
+    assert output.shape == (2, 256)
+    assert sum(x.size for x in jax.tree.leaves(params)) == 342457
+    translated = {**obs, "xyz": (obs["xyz"].reshape(2, 32, 3) + jnp.array([1., 2., -.5])).reshape(2, -1)}
+    np.testing.assert_allclose(forward(params, translated, bank), output, atol=2e-5, rtol=2e-5)
+    padded = {"xyz": jnp.pad(obs["xyz"].reshape(2, 32, 3), ((0, 0), (0, 5), (0, 0))).reshape(2, -1),
+              "feature_ids": jnp.pad(obs["feature_ids"], ((0, 0), (0, 5)), constant_values=-1)}
+    np.testing.assert_allclose(forward(params, padded, bank), output, atol=2e-5, rtol=2e-5)
+    grad = jax.jit(jax.grad(lambda p: jnp.square(net.apply(p, obs, bank)).mean()))(params)
+    assert all(np.isfinite(x).all() for x in jax.tree.leaves(grad))
+    assert any(np.any(x != 0) for x in jax.tree.leaves(grad))
 
 
-def visual_obs():
-    return {"agent": {"qpos": np.array([[1, 2]], dtype=np.float32), "controller": {}},
-            "extra": {"is_grasped": np.array([True]), "goal_pos": np.array([[3, 4, 5]], dtype=np.float32)},
-            "sensor_data": {key: {"rgb": np.full((1, 8, 8, 3), rgb, np.uint8),
-                                   "depth": np.full((1, 8, 8, 1), 1500, np.uint16)}
-                            for key, rgb in [("hand_camera", 255), ("base_camera", 0)]}}
+def test_map_networks_ignore_normalizer_and_have_separate_encoders(points):
+    _, _, obs, bank = points
+    factory = network_factory("map", {}, SimpleNamespace(features=bank))
+    nets = factory({k: v.shape[1:] for k, v in obs.items()}, 3,
+                   preprocess_observations_fn=lambda *_: pytest.fail("Map must not normalize xyz/IDs"))
+    actor = nets.policy_network.init(jax.random.PRNGKey(1))
+    critic = nets.value_network.init(jax.random.PRNGKey(2))
+    assert nets.policy_network.apply(None, actor, obs).shape == (2, 6)
+    assert nets.value_network.apply(None, critic, obs).shape == (2,)
+    assert not np.array_equal(actor['params']['MapEncoder_0']['input']['kernel'],
+                              critic['params']['MapEncoder_0']['input']['kernel'])
 
 
-def write_tree(group, tree):
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            if isinstance(v, dict):
-                write_tree(group.create_group(k), v)
-            else:
-                group.create_dataset(k, data=v)
+def test_surface_voxels_and_tabletop():
+    mesh = trimesh.creation.box(extents=(.1, .1, .1))
+    xyz, _ = surface_points(mesh, .015)
+    assert len(np.unique(np.floor(xyz / .015), axis=0)) == len(xyz)
+    xyz, normals = surface_points(mesh, .015, tabletop=True)
+    np.testing.assert_allclose(xyz[:, 2], .05)
+    assert (normals[:, 2] > .9).all()
 
 
-@pytest.mark.parametrize("mode", ["state", "rgb", "rgbd"])
-def test_policy_checkpoint_roundtrip(tmp_path, mode):
-    obs = np.ones((1, 5), np.float32) if mode == "state" else visual_obs()
-    spec = observation_spec(obs, mode)
-    actions = [{"key": None, "size": 2, "low": [-1.0, -1.0], "high": [1.0, 1.0]}]
-    policy = Policy(spec, actions, env_config("PickCube-v1", mode)).eval()
-    path = tmp_path / "policy.pt"
-    expected = policy.act(obs)
-    save_policy(path, policy, {"algorithm": "bc", "seed": 0})
-    restored = load_policy(path)
-    torch.testing.assert_close(restored.act(obs), expected, rtol=0, atol=0)
-    assert restored.env_config == policy.env_config
-    if mode != "state":
-        prepared = restored.prepare(obs)
-        assert spec["cameras"] == ["base_camera", "hand_camera"]
-        assert prepared["rgb"].shape == (1, 6, 128, 128)
-        assert prepared["rgb"][0, :3].max() == 0
-        assert prepared["rgb"][0, 3:].min() == 255
-        assert ["extra", "is_grasped"] in spec["state_paths"]
-        if mode == "rgbd":
-            assert torch.all(prepared["depth"] == 1.5)
+def test_background_selection_keeps_all_robot_and_articulated_parts():
+    model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+      <geom name="floor_box" type="box" size="1 1 .1"/>
+      <geom name="wall_mesh_proxy" type="box" size=".1 1 1"/>
+      <geom name="plain_plane" type="plane" size="1 1 .1"/>
+      <geom name="camera_housing" size=".02"/>
+      <body name="link0"><geom name="base" size=".1"/>
+        <body name="hand"><geom name="hand_visual" size=".03"/>
+          <body name="finger"><joint/><geom name="finger_visual" size=".01"/></body>
+        </body>
+      </body>
+      <body name="handle"><joint type="slide"/><geom name="handle_visual" size=".02"/>
+        <body name="drawer_child"><geom name="drawer_part" size=".03"/></body>
+      </body>
+      <body name="furniture"><geom name="support" size=".04"/></body>
+      <body name="mocap_target" mocap="true"><geom name="goal" size=".01"/></body>
+    </worldbody></mujoco>''')
+    def selected(background, robot='full'):
+        return {model.geom(g).name for _, geoms, _ in components(model, 'PandaOpenCabinet',
+                                                                {'background': background, 'robot': robot}) for g in geoms}
+    assert selected(False) == {'base', 'hand_visual', 'finger_visual', 'handle_visual', 'drawer_part'}
+    assert selected(True) == selected(False) | {'camera_housing', 'support'}
+    assert selected(False, 'gripper') == selected(False) - {'base'}
+    assert selected(True, 'gripper') == selected(True) - {'base'}
+    with pytest.raises(ValueError, match='background must be true or false'):
+        selected('none')
+    with pytest.raises(ValueError, match='robot must be full or gripper'):
+        selected(False, 'arm')
 
 
-def demo_fixture(tmp_path, mode="state", multi=False):
-    path = tmp_path / "trajectory.h5"
-    obs = np.array([[1, 2], [3, 4], [999, 999]], dtype=np.float32)
-    metadata = {"env_info": env_config("TwoRobotPickCube-v1" if multi else "PickCube-v1", mode),
-                "episodes": [{"episode_id": 7}, {"episode_id": 2}]}
-    action_parts = ([{"key": k, "size": 1, "low": [-1.0], "high": [1.0]} for k in ("left", "right")]
-                    if multi else [{"key": None, "size": 2, "low": [-1.0, -1.0], "high": [1.0, 1.0]}])
-    with h5py.File(path, "w") as data:
-        for index in [7, 2]:
-            group = data.create_group(f"traj_{index}")
-            if mode == "state":
-                group.create_dataset("obs", data=obs)
-                example = obs[:1]
-            else:
-                example = visual_obs()
-                def repeat(tree):
-                    return {k: repeat(v) if isinstance(v, dict) else np.repeat(v, 3, axis=0) for k, v in tree.items()}
-                write_tree(group.create_group("obs"), repeat(example))
-            actions = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
-            if multi:
-                action_group = group.create_group("actions")
-                for i, key in enumerate(("left", "right")):
-                    action_group.create_dataset(key, data=actions[:, i:i+1])
-            else:
-                group.create_dataset("actions", data=actions)
-    path.with_suffix(".json").write_text(json.dumps(metadata))
-    return path, metadata, observation_spec(example, mode), action_parts, example
+@pytest.mark.parametrize('kind,size', [('box', '.02 .03 .04'), ('sphere', '.02'),
+                                     ('ellipsoid', '.02 .03 .04'), ('capsule', '.02 .03'),
+                                     ('cylinder', '.02 .03')])
+def test_primitive_visual_meshes(kind, size):
+    model = mujoco.MjModel.from_xml_string(
+        f'<mujoco><worldbody><geom type="{kind}" size="{size}" pos=".1 .2 .3"/></worldbody></mujoco>')
+    mesh = visual_mesh(model, [0])
+    assert len(mesh.faces) and np.isfinite(mesh.vertices).all()
+    np.testing.assert_allclose(mesh.bounds.mean(0), [.1, .2, .3], atol=1e-6)
 
 
-@pytest.mark.parametrize("mode", ["state", "rgb", "rgbd"])
-@pytest.mark.parametrize("multi", [False, True])
-def test_demo_alignment_and_preprocessing(tmp_path, mode, multi):
-    path, metadata, spec, actions, example = demo_fixture(tmp_path, mode, multi)
-    dataset = DemoDataset(path, metadata, spec, actions)
+def test_cache_key_tracks_appearance_and_extraction():
+    model = mujoco.MjModel.from_xml_string('''<mujoco><asset>
+      <texture name="tex" type="2d" builtin="checker" width="16" height="16"/>
+      <material name="mat" texture="tex"/></asset><worldbody><body>
+      <geom type="box" size=".02 .02 .03" material="mat"/></body></worldbody></mujoco>''')
+    config = {'voxel_size': .015, 'views': 96, 'extra_views': 512,
+              'dino': {'sha256': 'weights-a', 'source_revision': 'source-a'}}
+
+    def key(m=model, c=config):
+        return appearance_key(m, [0], visual_mesh(m, [0]), c, False)
+
+    original = key()
+    model.body_pos[1] += 1  # Runtime placement is intentionally independent of local maps.
+    assert key() == original
+    for field in ('geom_size', 'mat_rgba', 'tex_data'):
+        changed = copy.copy(model)
+        getattr(changed, field).flat[0] += 1
+        assert key(changed) != original
+    assert key(c={**config, 'views': 4}) != original
+    assert key(c={**config, 'dino': {**config['dino'], 'sha256': 'weights-b'}}) != original
+
+
+def test_feature_bank_validation_and_reuse(tmp_path):
+    path = tmp_path / "features.h5"
+    with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = MAP_VERSION
+        f["xyz"] = np.zeros((2, 3), np.float32)
+        f["features"] = np.ones((2, 1024), np.float16)
+    bank = FeatureBank()
+    a = bank.add(path)
+    b = bank.add(path)
+    assert a is b and bank.size == 2
+    assert bank.features.shape == (2, 1024)
+    with h5py.File(path, "a") as f:
+        f.attrs["format_version"] = 1
+    with pytest.raises(ValueError, match="Incompatible"):
+        FeatureBank().add(path)
+
+
+def test_articulated_parts_follow_forward_kinematics():
+    model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+      <body name="base" pos="1 2 3"><geom size=".1"/>
+        <body name="arm" pos=".3 0 0"><joint axis="0 0 1"/>
+          <geom size=".1" pos=".1 0 0"/>
+          <body name="finger" pos=".2 0 0"><joint type="slide" axis="1 0 0"/>
+            <geom size=".02" pos=".02 .01 0"/>
+          </body>
+        </body>
+      </body>
+    </worldbody></mujoco>''')
+    mapper = object.__new__(MapObservationWrapper)
+    mapper.local = jnp.array([[0, 0, 0], [.1, 0, 0], [.02, .01, 0]])
+    mapper.body_ids = jnp.array([1, 2, 3])
+    mapper.feature_ids = jnp.arange(3)
+    data = mujoco.MjData(model)
+    for qpos, expected in (
+        ([0, 0], [[1, 2, 3], [1.4, 2, 3], [1.52, 2.01, 3]]),
+        ([np.pi / 2, .04], [[1, 2, 3], [1.3, 2.1, 3], [1.29, 2.26, 3]]),
+    ):
+        data.qpos[:] = qpos
+        mujoco.mj_forward(model, data)
+        poses = SimpleNamespace(xmat=jnp.asarray(data.xmat.reshape(-1, 3, 3)), xpos=jnp.asarray(data.xpos))
+        out = mapper.observation(poses)["xyz"].reshape(-1, 3)
+        np.testing.assert_allclose(out, expected, atol=1e-6)
+
+
+@pytest.mark.integration
+def test_isolated_renderer_geometry_depth_and_model_preservation():
+    model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+      <body name="box" pos="1 2 3"><geom type="box" size=".02 .02 .03" pos=".01 0 0" rgba="1 0 0 1"/></body>
+      <geom type="box" size=".5 .5 .5" rgba="0 1 0 1"/>
+      <site name="a" pos="-.03 0 .1"/><site name="b" pos=".03 0 .1"/>
+    </worldbody><tendon><spatial width=".004" rgba="0 1 0 1">
+      <site site="a"/><site site="b"/>
+    </spatial></tendon></mujoco>''')
+    before = copy.copy(model)
+    geom = int(model.body_geomadr[model.body("box").id])
+    mesh = visual_mesh(model, [geom])
+    np.testing.assert_allclose(mesh.bounds, [[-.01, -.02, -.03], [.03, .02, .03]])
+    renderer = IsolatedRenderer(model, [geom])
     try:
-        assert len(dataset) == 4
-        obs, action = dataset[0]
-        online = prepare_observation(example, spec, "cpu")
-        for k in online:
-            torch.testing.assert_close(obs[k], online[k][0], rtol=0, atol=0)
-        torch.testing.assert_close(action, torch.tensor([0.1, 0.2]))
-        torch.testing.assert_close(dataset[1][1], torch.tensor([0.3, 0.4]))
-        torch.testing.assert_close(dataset[2][1], torch.tensor([0.1, 0.2]))
-        if mode == "state":
-            assert dataset[1][0]["state"].tolist() == [3, 4]
-            assert dataset[2][0]["state"].tolist() == [1, 2]
+        rgb, depth, pos, rot, _ = renderer.render(np.array([.01, 0, .2]), np.array([.01, 0, 0]))
+        assert rgb[128, 128, 0] > rgb[128, 128, 1]
+        np.testing.assert_allclose(depth[128, 128], .17, atol=.001)
+        np.testing.assert_allclose(pos, [.01, 0, .2], atol=1e-6)
+        np.testing.assert_allclose(rot.T @ rot, np.eye(3), atol=1e-6)
     finally:
-        dataset.close()
-
-
-def test_bad_demos_fail_early(tmp_path):
-    path, metadata, spec, actions, _ = demo_fixture(tmp_path)
-    with pytest.raises(ValueError, match="requested"):
-        read_metadata(path, "rgb")
-    metadata["env_info"]["env_kwargs"]["obs_mode"] = "none"
-    path.with_suffix(".json").write_text(json.dumps(metadata))
-    with pytest.raises(ValueError, match="replay"):
-        read_metadata(path, "state")
-    path.with_suffix(".json").unlink()
-    with pytest.raises(ValueError, match="matching"):
-        read_metadata(path, "state")
-    with h5py.File(path, "a") as f:
-        del f["traj_7/obs"]
-    with pytest.raises(ValueError, match="missing obs"):
-        DemoDataset(path, metadata, spec, actions)
-
-
-@pytest.mark.parametrize("bad_field", ["obs", "actions"])
-def test_bad_demo_lengths_and_action_dimensions(tmp_path, bad_field):
-    path, metadata, spec, actions, _ = demo_fixture(tmp_path)
-    with h5py.File(path, "a") as f:
-        del f[f"traj_7/{bad_field}"]
-        f["traj_7"].create_dataset(bad_field, data=np.zeros((2, 3), dtype=np.float32))
-    with pytest.raises(ValueError):
-        DemoDataset(path, metadata, spec, actions)
-
-
-def test_native_multi_robot_metadata(tmp_path):
-    path, metadata, _, _, _ = demo_fixture(tmp_path, multi=True)
-    controllers = {"panda_wristcam-0": "pd_joint_delta_pos", "panda_wristcam-1": "pd_joint_delta_pos"}
-    metadata["env_info"]["env_kwargs"]["control_mode"] = controllers
-    metadata["env_info"]["env_kwargs"]["robot_uids"] = ["panda_wristcam", "panda_wristcam"]
-    for episode in metadata["episodes"]:
-        episode["control_mode"] = controllers
-    path.with_suffix(".json").write_text(json.dumps(metadata))
-    _, config = read_metadata(path, "state")
-    assert config["env_kwargs"]["control_mode"] == "pd_joint_delta_pos"
-    with pytest.raises(ValueError, match="same controller"):
-        shared_control_mode(["pd_joint_pos", "pd_joint_delta_pos"])
-
-
-def test_bc_controller_selection_never_reinterprets_actions(tmp_path):
-    path, metadata, _, _, _ = demo_fixture(tmp_path)
-    assert read_metadata(path, "state", "pd_ee_delta_pose")[1]["env_kwargs"]["control_mode"] == "pd_ee_delta_pose"
-    # Absolute and delta pose have the same action dimension but different semantics.
-    with pytest.raises(ValueError, match="--target-control-mode pd_ee_pose"):
-        read_metadata(path, "state", "pd_ee_pose")
-    metadata["env_info"]["env_kwargs"]["control_mode"] = "pd_joint_delta_pos"
-    path.with_suffix(".json").write_text(json.dumps(metadata))
-    with pytest.raises(ValueError, match="--control-mode pd_joint_delta_pos"):
-        read_metadata(path, "state", "pd_ee_delta_pose")
-    _, config = read_metadata(path, "state", "pd_joint_delta_pos")
-    assert config["env_kwargs"]["control_mode"] == "pd_joint_delta_pos"
-
-
-def test_rl_demo_preserves_unclipped_actions(tmp_path):
-    path, metadata, spec, actions, _ = demo_fixture(tmp_path)
-    with h5py.File(path, "a") as f:
-        f["traj_7/actions"][0] = [2.5, -3.0]
-    dataset = DemoDataset(path, metadata, spec, actions)
-    try:
-        torch.testing.assert_close(dataset[0][1], torch.tensor([2.5, -3.0]))
-    finally:
-        dataset.close()
-
-
-@pytest.mark.parametrize("mode", ["rgb", "rgbd"])
-@pytest.mark.parametrize("view,expected", [
-    ("external", ["base_camera"]),
-    ("wrist", ["hand_camera"]),
-    ("all", ["base_camera", "hand_camera"]),
-])
-def test_camera_view_input_and_checkpoint(tmp_path, mode, view, expected):
-    obs = visual_obs()
-    spec = observation_spec(obs, mode, view)
-    assert spec["cameras"] == expected
-    actions = [{"key": None, "size": 2, "low": [-1.0, -1.0], "high": [1.0, 1.0]}]
-    policy = Policy(spec, actions, env_config("PegInsertionSide-v1", mode)).eval()
-    prepared = policy.prepare(obs)
-    assert prepared["rgb"].shape == (1, len(expected) * 3, 128, 128)
-    if view == "external":
-        assert torch.all(prepared["rgb"] == 0)
-    elif view == "wrist":
-        assert torch.all(prepared["rgb"] == 255)
-    if mode == "rgbd":
-        assert prepared["depth"].shape == (1, len(expected), 128, 128)
-        assert torch.all(prepared["depth"] == 1.5)
-    full = prepare_observation(obs, observation_spec(obs, mode), "cpu")
-    torch.testing.assert_close(prepared["state"], full["state"])
-    path = tmp_path / "policy.pt"
-    save_policy(path, policy, {"algorithm": "bc", "view": view})
-    loaded = load_policy(path)
-    assert loaded.obs_spec == spec
-    torch.testing.assert_close(loaded.act(obs), policy.act(obs), rtol=0, atol=0)
-
-
-def test_both_robot_wrist_cameras_are_selected():
-    obs = visual_obs()
-    wrist = obs["sensor_data"].pop("hand_camera")
-    obs["sensor_data"].update({f"panda_wristcam-{i}-hand_camera": wrist for i in (0, 1)})
-    spec = observation_spec(obs, "rgbd", "wrist")
-    assert spec["cameras"] == ["panda_wristcam-0-hand_camera", "panda_wristcam-1-hand_camera"]
-    assert observation_spec(obs, "rgbd", "external")["cameras"] == ["base_camera"]
-    assert prepare_observation(obs, spec, "cpu")["rgb"].shape == (1, 6, 128, 128)
-
-
-def test_missing_views_and_state_view_fail_clearly():
-    obs = visual_obs()
-    del obs["sensor_data"]["hand_camera"]
-    with pytest.raises(ValueError, match="No cameras.*wrist.*base_camera"):
-        observation_spec(obs, "rgb", "wrist")
-    obs = visual_obs()
-    del obs["sensor_data"]["base_camera"]
-    with pytest.raises(ValueError, match="No cameras.*external.*hand_camera"):
-        observation_spec(obs, "rgbd", "external")
-    with pytest.raises(ValueError, match="requires --obs-mode rgb or rgbd"):
-        observation_spec(np.zeros((1, 5)), "state", "wrist")
-
-
-@pytest.mark.parametrize("view,unused", [("wrist", "base_camera"), ("external", "hand_camera")])
-def test_bc_does_not_read_unselected_cameras(tmp_path, view, unused):
-    path, metadata, _, actions, obs = demo_fixture(tmp_path, "rgbd")
-    spec = observation_spec(obs, "rgbd", view)
-    with h5py.File(path, "a") as f:
-        for name in f:
-            del f[f"{name}/obs/sensor_data/{unused}"]
-    dataset = DemoDataset(path, metadata, spec, actions)
-    try:
-        sample, _ = dataset[0]
-        expected = prepare_observation(obs, spec, "cpu")
-        for key in sample:
-            torch.testing.assert_close(sample[key], expected[key][0])
-    finally:
-        dataset.close()
-    with pytest.raises(ValueError, match="missing selected cameras"):
-        DemoDataset(path, metadata, observation_spec(obs, "rgbd", "all"), actions)
-
-
-@pytest.mark.parametrize("mode", ["state", "rgbd"])
-def test_legacy_checkpoint_without_view_loads_as_all(tmp_path, mode):
-    obs = np.ones((1, 5), np.float32) if mode == "state" else visual_obs()
-    spec = observation_spec(obs, mode)
-    actions = [{"key": None, "size": 2, "low": [-1.0, -1.0], "high": [1.0, 1.0]}]
-    policy = Policy(spec, actions, env_config("PickCube-v1", mode)).eval()
-    path = tmp_path / "legacy.pt"
-    save_policy(path, policy, {"algorithm": "ppo"})
-    checkpoint = torch.load(path, weights_only=True)
-    del checkpoint["obs_spec"]["view"]
-    del checkpoint["obs_spec"]["state_input"]
-    torch.save(checkpoint, path)
-    loaded = load_policy(path)
-    assert loaded.obs_spec == observation_spec(obs, mode)
-    assert loaded.obs_spec["view"] == "all"
-    torch.testing.assert_close(loaded.act(obs), policy.act(obs), rtol=0, atol=0)
+        renderer.close()
+    for name in ("geom_group", "geom_pos", "geom_rgba", "body_pos"):
+        np.testing.assert_array_equal(getattr(model, name), getattr(before, name))

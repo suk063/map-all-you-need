@@ -1,194 +1,119 @@
-"""Minimal vectorized PPO using the same actor and observations as BC."""
+"""Train official Playground/Brax PPO with state, RGB or a component map."""
 
 import argparse
+import json
 import math
 import time
+from importlib.metadata import distribution, version
+from pathlib import Path
 
-import torch
-from torch import nn
-from torch.distributions import Normal
+import jax
+from brax.training.agents.ppo import train as ppo
+from mujoco_playground._src import wrapper
 
 from benchmark.common.envs import (
-    DEFAULT_CONTROL_MODE,
+    DEFAULT_TASK,
     OBS_MODES,
     TASKS,
-    action_spec,
     env_config,
     make_env,
-    resolved_config,
+    ppo_config,
 )
-from benchmark.common.mapping import batch_observations
-from benchmark.common.policy import (
-    Policy,
-    add_policy_arguments,
-    observation_spec,
-    policy_options,
-    save_policy,
-)
-from benchmark.common.utils import log_row, run_directory, seed_everything, write_json
+from benchmark.common.policy import network_factory
+from benchmark.common.utils import log_metrics, run_directory, write_json
+
+# CLI options replace only explicitly supplied official PPO parameters.
+PPO_ARGUMENTS = {
+    "num_envs": int, "num_eval_envs": int, "unroll_length": int,
+    "batch_size": int, "num_minibatches": int, "num_updates_per_batch": int,
+    "num_evals": int, "num_resets_per_eval": int, "learning_rate": float, "discounting": float,
+    "entropy_cost": float, "clipping_epsilon": float, "gae_lambda": float,
+    "reward_scaling": float, "max_grad_norm": float,
+}
 
 
-def compute_gae(rewards, values, next_values, terminated, truncated, gamma, gae_lambda):
-    """Bootstrap timeouts, never true terminals; stop the trace at either boundary."""
-    advantages = torch.zeros_like(rewards)
-    trace = torch.zeros_like(rewards[0])
-    for t in reversed(range(len(rewards))):
-        delta = rewards[t] + gamma * (~terminated[t]).float() * next_values[t] - values[t]
-        trace = delta + gamma * gae_lambda * (~(terminated[t] | truncated[t])).float() * trace
-        advantages[t] = trace
-    return advantages, advantages + values
-
-
-class ActorCritic(nn.Module):
-    def __init__(self, policy):
-        super().__init__()
-        self.policy = policy
-        self.critic = nn.Sequential(nn.Linear(policy.encoder.output_dim, 256), nn.Tanh(), nn.Linear(256, 1))
-
-    def value(self, obs):
-        return self.critic(self.policy.encoder(obs)).squeeze(-1)
-
-    def action_value(self, obs, action=None):
-        features = self.policy.encoder(obs)
-        dist = Normal(self.policy.mean(features), self.policy.log_std.exp())
-        if action is None:
-            action = dist.sample()
-        return action, dist.log_prob(action).sum(-1), dist.entropy().sum(-1), self.critic(features).squeeze(-1)
+def parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--env-id", choices=TASKS, default=DEFAULT_TASK)
+    p.add_argument("--obs-mode", choices=OBS_MODES, default="state")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--impl", choices=("jax", "warp"), help="Default: the task's native implementation")
+    p.add_argument("--total-timesteps", type=int, help="Default: official task PPO training budget")
+    p.add_argument("--output", help="New run directory (never overwrites an existing run)")
+    p.add_argument("--run-evals", action=argparse.BooleanOptionalAction, default=True)
+    for name, kind in PPO_ARGUMENTS.items():
+        p.add_argument("--" + name.replace("_", "-"), type=kind)
+    p.add_argument("--map-robot", choices=("full", "gripper"), default="full",
+                   help="Robot visual parts: whole robot or manipulation hand/gripper")
+    p.add_argument("--map-background", choices=("true", "false"), default="false",
+                   help="Include task-unrelated scene objects; floors/walls/goals are always excluded")
+    p.add_argument("--map-cache", default=".cache/maps")
+    p.add_argument("--map-views", type=int, default=96)
+    p.add_argument("--map-extra-views", type=int, default=512)
+    p.add_argument("--dino-source", help="Local DINOv3 source (map cache creation only)")
+    p.add_argument("--dino-weights", help="Local DINOv3 ViT-L/16 weights")
+    return p
 
 
 def train(args):
-    if min(args.total_timesteps, args.num_steps, args.update_epochs,
-           args.batch_size if args.batch_size is not None else 1, args.save_every) < 1:
-        raise ValueError("Training counts must be positive")
-    seed_everything(args.seed)
-    setup_start = time.monotonic()
-    options = policy_options(args)
-    num_envs = args.num_envs if args.num_envs is not None else (256 if args.obs_mode == "state" else 8 if args.obs_mode == "map" else 32)
-    if args.batch_size is None:
-        args.batch_size = 16 if args.obs_mode == "map" else 256
-    config = env_config(args.env_id, args.obs_mode, args.control_mode)
+    start = time.monotonic()
+    config = env_config(args.env_id, args.obs_mode, args.impl)
+    params = ppo_config(config)
+    for name in PPO_ARGUMENTS:
+        value = getattr(args, name)
+        if value is not None:
+            nonnegative = name in ('entropy_cost', 'num_evals', 'num_resets_per_eval')
+            if not math.isfinite(value) or value < 0 or (value == 0 and not nonnegative):
+                raise ValueError(f"Invalid --{name.replace('_', '-')}: {value}")
+            params[name] = value
+    if args.total_timesteps is not None:
+        if args.total_timesteps < 1:
+            raise ValueError("--total-timesteps must be positive")
+        params["num_timesteps"] = args.total_timesteps
+    if params["batch_size"] * params["num_minibatches"] % params["num_envs"]:
+        raise ValueError("Brax requires batch_size * num_minibatches to be divisible by num_envs")
     if args.obs_mode == "map":
-        config["map"] = options["map_config"]
-    env = make_env(config, num_envs)
-    try:
-        raw_obs, _ = env.reset(seed=args.seed)
-        policy = Policy(observation_spec(raw_obs, args.obs_mode, args.view, **options), action_spec(env),
-                        resolved_config(config, env), env.map_bank).to(args.device)
-        agent = ActorCritic(policy).to(args.device)
-        optimizer = torch.optim.Adam((p for p in agent.parameters() if p.requires_grad), lr=args.learning_rate, eps=1e-5)
-        output = run_directory(args.output, "rl", args.env_id, args.obs_mode, args.seed)
-        obs = policy.prepare(raw_obs)
-        settings = {**vars(args), "num_envs": num_envs, "algorithm": "ppo", "env_config": policy.env_config,
-                    "obs_spec": policy.obs_spec, "setup_seconds": time.monotonic() - setup_start,
-                    "trainable_parameters": sum(p.numel() for p in agent.parameters() if p.requires_grad)}
-        if args.obs_mode == "map":
-            settings["initial_map_points"] = (obs["feature_ids"] >= 0).sum(1).tolist()
-        write_json(output / "config.json", settings)
-        if policy.device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(policy.device)
-        step_count, iteration, start = 0, 0, time.monotonic()
-        while step_count < args.total_timesteps:
-            iteration += 1
-            steps = min(args.num_steps, math.ceil((args.total_timesteps - step_count) / num_envs))
-            observations = []
-            shape = (steps, num_envs)
-            actions = torch.empty((*shape, policy.mean.out_features), device=args.device)
-            log_probs, rewards, values, next_values = [torch.empty(shape, device=args.device) for _ in range(4)]
-            terminated, truncated = [torch.zeros(shape, dtype=torch.bool, device=args.device) for _ in range(2)]
-            episode_metrics = []
-            with torch.no_grad():
-                for t in range(steps):
-                    observations.append({key: value.clone() for key, value in obs.items()})
-                    action, log_prob, _, value = agent.action_value(obs)
-                    # Store the sampled action/log-probability; only the executed action is clipped.
-                    actions[t], log_probs[t], values[t] = action, log_prob, value
-                    raw_obs, reward, term, trunc, info = env.step(policy.clip(action).to(env.device))
-                    rewards[t] = reward.to(args.device)
-                    terminated[t], truncated[t] = term.to(args.device), trunc.to(args.device)
-                    obs = policy.prepare(raw_obs)
-                    next_values[t] = agent.value(obs)
-                    done = terminated[t] | truncated[t]
-                    if done.any():
-                        final_values = agent.value(policy.prepare(info["final_observation"]))
-                        next_values[t] = torch.where(done, final_values, next_values[t])
-                        metrics = info["final_info"]["episode"]
-                        episode_metrics.append({k: metrics[k][info["_final_info"]].float()
-                                                for k in ("return", "success_once")})
-                    step_count += num_envs
-                advantages, returns = compute_gae(rewards, values, next_values, terminated, truncated, args.gamma, args.gae_lambda)
-
-            flat_obs = batch_observations(observations)
-            del observations
-            flat_actions = actions.flatten(0, 1)
-            old_log_probs, advantages, returns = log_probs.flatten(), advantages.flatten(), returns.flatten()
-            advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-            size = steps * num_envs
-            for _ in range(args.update_epochs):
-                indices = torch.randperm(size, device=args.device)
-                for batch in indices.split(args.batch_size):
-                    _, log_prob, entropy, value = agent.action_value({k: v[batch] for k, v in flat_obs.items()}, flat_actions[batch])
-                    log_ratio = log_prob - old_log_probs[batch]
-                    ratio = log_ratio.exp()
-                    surrogate = advantages[batch] * ratio
-                    clipped = advantages[batch] * ratio.clamp(1 - args.clip_coef, 1 + args.clip_coef)
-                    policy_loss = -torch.minimum(surrogate, clipped).mean()
-                    value_loss = 0.5 * (value - returns[batch]).square().mean()
-                    loss = policy_loss + args.value_coef * value_loss - args.entropy_coef * entropy.mean()
-                    if not torch.isfinite(loss):
-                        raise RuntimeError("Non-finite PPO loss")
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                    optimizer.step()
-                    approx_kl = ((ratio - 1) - log_ratio).mean().item()
-                    if approx_kl > args.target_kl:
-                        break
-                if approx_kl > args.target_kl:
-                    break
-            metrics = {k: torch.cat([m[k] for m in episode_metrics]).mean().item()
-                       if episode_metrics else None for k in ("return", "success_once")}
-            seconds = time.monotonic() - start
-            log_row(output / "train.csv", {
-                "iteration": iteration, "steps": step_count,
-                "seconds": seconds, "samples_per_second": step_count / seconds,
-                "peak_gpu_memory_mb": torch.cuda.max_memory_allocated(policy.device) / 2**20 if policy.device.type == "cuda" else None,
-                "policy_loss": policy_loss.item(),
-                "value_loss": value_loss.item(), "entropy": entropy.mean().item(),
-                "approx_kl": approx_kl, **metrics,
-            })
-            if iteration % args.save_every == 0 or step_count >= args.total_timesteps:
-                save_policy(output / "policy.pt", policy, {**settings, "steps": step_count})
-        print(f"Policy saved: {output / 'policy.pt'}")
-        return output / "policy.pt"
-    finally:
-        env.close()
+        if args.map_views < 1 or args.map_extra_views < 0:
+            raise ValueError("Map views must be positive and extra views nonnegative")
+        from benchmark.common.dino import dino_config
+        config["map"] = {"robot": args.map_robot, "background": args.map_background == "true",
+                         "voxel_size": .015, "views": args.map_views, "extra_views": args.map_extra_views,
+                         "cache": str(Path(args.map_cache).expanduser().resolve()),
+                         "dino": dino_config(args.dino_source, args.dino_weights)}
+    env = make_env(config, params["num_envs"])
+    bank = env.bank if args.obs_mode == "map" else None
+    factory = network_factory(args.obs_mode, params["network_factory"], bank)
+    num_eval_envs = params.get("num_eval_envs", 128)
+    eval_env = make_env(config, num_eval_envs) if args.run_evals else None
+    output = run_directory(args.output, args.env_id, args.obs_mode, args.seed)
+    metadata = {"format_version": 2, "algorithm": "brax_ppo", "seed": args.seed,
+                "env_config": config, "ppo": params, "action_size": env.action_size,
+                "observation_size": env.observation_size,
+                "run_evals": args.run_evals, "setup_seconds": time.monotonic() - start,
+                "versions": {name: version(name) for name in ("playground", "brax", "jax", "jaxlib", "mujoco", "mujoco-mjx",
+                             "mujoco-warp", "warp-lang", "flax", "optax", "orbax-checkpoint", "numpy")},
+                "sources": {name: json.loads(distribution(name).read_text("direct_url.json") or '{}')
+                            for name in ('playground', 'brax')},
+                "devices": [str(d) for d in jax.devices()]}
+    if bank is not None:
+        metadata.update(map_cache_paths=bank.paths, map_points=len(env.feature_ids), map_components=env.component_names)
+        metadata["versions"].update({name: version(name) for name in ('torch', 'h5py', 'trimesh')})
+    write_json(output / "config.json", metadata)
+    print(f"Training {args.env_id}/{args.obs_mode}; results: {output}", flush=True)
+    training_params = {key: value for key, value in params.items() if key != "network_factory"}
+    ppo.train(
+        environment=env, eval_env=eval_env, network_factory=factory,
+        wrap_env_fn=wrapper.wrap_for_brax_training, vision=args.obs_mode == "rgb",
+        seed=args.seed, save_checkpoint_path=str(output / "checkpoints"),
+        progress_fn=lambda step, metrics: log_metrics(output / "train.csv", step, metrics),
+        run_evals=args.run_evals, log_training_metrics=True, **training_params,
+    )
+    print(f"Saved run: {output}", flush=True)
+    return output
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-id", choices=TASKS, default="PickCube-v1")
-    parser.add_argument("--obs-mode", choices=OBS_MODES, default="state")
-    add_policy_arguments(parser)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--num-envs", type=int)
-    parser.add_argument("--total-timesteps", type=int, default=10_000_000)
-    parser.add_argument("--num-steps", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, help="Default: 16 for map, 256 otherwise")
-    parser.add_argument("--update-epochs", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-coef", type=float, default=0.2)
-    parser.add_argument("--value-coef", type=float, default=0.5)
-    parser.add_argument("--entropy-coef", type=float, default=0.0)
-    parser.add_argument("--max-grad-norm", type=float, default=0.5)
-    parser.add_argument("--target-kl", type=float, default=0.03)
-    parser.add_argument("--control-mode", default=DEFAULT_CONTROL_MODE,
-                        help="Robot controller (default: %(default)s)")
-    parser.add_argument("--save-every", type=int, default=10, help="Checkpoint interval in PPO iterations")
-    parser.add_argument("--output", help="New run directory (must not already exist)")
-    train(parser.parse_args())
+    train(parser().parse_args())
 
 
 if __name__ == "__main__":
