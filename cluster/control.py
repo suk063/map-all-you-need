@@ -347,7 +347,7 @@ class Controller:
                 if exp.get('job'):
                     self.completion(exp)
                 continue
-            if exp['status'] in ('queued', 'held'):
+            if exp['status'] in ('queued', 'held', 'skipped'):
                 continue
             if exp['status'] == 'completed':
                 self.collect(exp)
@@ -386,7 +386,7 @@ class Controller:
                 grace = self.cfg['stall_seconds'] if exp.get('steps', 0) > 0 else self.cfg['startup_grace_seconds']
                 if time.time() - exp.get('progress_at', exp['submitted_at']) > grace:
                     self.decide(exp, owned, failed=False)
-        allowed = self.data['experiments'] if self.data['validation']['status'] == 'fetched' else [self.data['validation']]
+        allowed = self.data['experiments'] if self.data['validation']['status'] in ('fetched', 'skipped') else [self.data['validation']]
         busy = {o['uid'] for p in pods if p.get('status', {}).get('phase') in ('Running', 'Pending', 'Unknown')
                 for o in p['metadata'].get('ownerReferences', []) if o.get('uid')}
         terminal = {j['metadata']['uid'] for j in jobs.values() if any(
@@ -415,7 +415,7 @@ class Controller:
         if self.data.get('startup_held'):
             return True
         return (self.data['validation']['status'] == 'held' or (
-            self.data['validation']['status'] == 'fetched' and
+            self.data['validation']['status'] in ('fetched', 'skipped') and
             all(e['status'] in ('fetched', 'held') for e in self.data['experiments']))
         ) and all('completion_decision' in e or e['status'] != 'fetched'
                   for e in [self.data['validation']] + self.data['experiments'] if e.get('job'))

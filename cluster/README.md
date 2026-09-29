@@ -41,7 +41,9 @@ tail -f runs/cluster/RUN_ID/monitor.log
 처음 실행하면 **같은 이미지의 GPU validation Job 1개**가 10개 환경 계약,
 30개 조합의 짧은 학습·평가, 중단 후 checkpoint 복원, 옮긴 map 평가를 먼저 검사한다.
 통과한 이미지의 실제 digest를 기록하고 이후 30개 Job을 그 digest로 고정한다.
-검증 실패 시 본 학습 제출을 보류한다. 검증 Job은 30개 본 학습 Job과 별도다.
+검증 실패 시 본 학습 제출을 보류한다. 사용자가 검증을 생략한 경우에는
+`run --skip-validation --image REPOSITORY@sha256:DIGEST`로 명시적으로 생략할 수 있으며,
+해당 run에 검증 생략 사실을 기록한다. 검증 Job은 30개 본 학습 Job과 별도다.
 Warp/JAX/PyTorch의 GPU 메모리가 긴 테스트 세션에 누적되지 않도록
 각 검증 case를 별도 Python 프로세스로 실행하고 종료 시 메모리를 회수한다.
 Smoke test는 작은 환경 수와 학습량으로 기능을 검증한다. 기본 RGB 128개 환경의

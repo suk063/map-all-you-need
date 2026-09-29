@@ -127,6 +127,9 @@ def main(argv=None):
         if name != 'login':
             command.add_argument('--image', help='Registry image tag or digest')
             command.add_argument('--run-id')
+        if name == 'run':
+            command.add_argument('--skip-validation', action='store_true',
+                                 help='Explicitly waive GPU validation; requires an immutable image digest')
         if name == 'render':
             command.add_argument('--output', type=Path, default=ROOT / 'runs/cluster/render')
     for name in ('status', 'watch', 'fetch'):
@@ -156,10 +159,15 @@ def main(argv=None):
         prerequisites(cfg)
         if not cfg['image']:
             raise ValueError('Set --image to a built and pushed cluster/Dockerfile image')
+        if args.skip_validation and '@sha256:' not in cfg['image']:
+            raise ValueError('--skip-validation requires an immutable image digest')
         with locked(root):
             if (root / 'run.json').exists():
                 raise ValueError('Run already exists; use watch ' + run_id)
             ctrl = Controller(cfg, run_id, root)
+            if args.skip_validation:
+                ctrl.cfg['resolved_image'] = cfg['image']
+                ctrl.data['validation'].update(status='skipped', note='GPU validation explicitly waived by user')
             ctrl.data['preflight'] = ctrl.kube.preflight()
             ctrl.data['created_at'] = datetime.now(timezone.utc).isoformat()
             ctrl.data['source_revision'] = subprocess.check_output(
