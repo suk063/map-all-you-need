@@ -236,6 +236,9 @@ replay를 시험할 때는 `--count 2`를 추가할 수 있습니다. task마다
 자세한 방법은 [replay 문서](https://maniskill.readthedocs.io/en/latest/user_guide/datasets/replay.html)에 있습니다.
 
 BC는 JSON에서 task·robot·controller·backend·환경 kwargs를 복원합니다.
+기존 goal marker가 RGB에 보이도록 만든 데이터는 `env_info.show_goal=true`로 표시합니다.
+이 설정은 checkpoint와 eval에서도 복원하며 goal의 collision/물리 상태는 변경하지 않습니다.
+기본 환경과 공식 replay는 ManiSkill의 원래 goal 표시 방식을 유지합니다.
 선택한 `--control-mode`(기본 `pd_ee_delta_pose`)가 데모의 controller와 다르면 학습 전에 오류를 냅니다.
 다른 controller로 수집한 데모는 동일한 `--control-mode`를 지정하거나 공식 replay로 변환해야 합니다.
 Eval은 CLI 기본값과 관계없이 checkpoint에 저장된 controller를 복원합니다.
@@ -335,3 +338,28 @@ DINO/map 추가 구현은 같은 RTX 4090 환경에서 **단위 테스트 40개,
 `pd_ee_delta_pose` 기본값과 BC controller 선택 추가 후 단위 테스트 41개,
 학습·평가 통합 테스트 10개, 16개 task의 state/RGB/RGBD reset·step 검사가 통과했습니다.
 SO100·WidowXAI 검사는 지원되는 `pd_joint_delta_pos`를 명시적으로 사용합니다.
+
+PickCube map BC도 공식 `pd_ee_delta_pose` 데모 **1,013개 전체(50,360 transition)**로
+10 epoch 학습해 확인했습니다. Gripper-only, table 제외, 기본 96+512 multiview 설정이며
+map은 420점입니다. 별도 image/state 입력은 사용하지 않았습니다.
+학습 seed 0, 평가 seed 10000, GPU 환경 8개, 100 episode 평가에서
+**success_once 90%, success_at_end 70%, 평균 return 187.0**을 기록했습니다.
+모든 episode는 task 기본 길이인 50 step까지 실행했습니다. 이는 한 task·한 학습 seed의 확인 결과입니다.
+
+```bash
+python -m benchmark.bc.train \
+  --demo-path demos/PickCube-v1/rl/trajectory.none.pd_ee_delta_pose.physx_cuda.h5 \
+  --obs-mode map --map-robot gripper --epochs 10 --batch-size 64 --save-every 1 \
+  --seed 0 --output runs/map-bc-pickcube-pose-all
+python -m benchmark.eval --checkpoint runs/map-bc-pickcube-pose-all/policy.pt \
+  --episodes 100 --num-envs 8 --seed 10000
+```
+
+학습·평가 JSON/CSV와 별도 seed 20000–20003의 rollout 영상은 로컬
+`runs/map-bc-pickcube-pose-all/`에 보관했습니다. 영상에는 성공·실패 사례가 모두 포함됩니다.
+
+RGB NatureCNN·Frozen DINO RGB·Map을 같은 데모와 minibatch 순서로 비교한 실험은
+로컬 `reports/pickcube-bc-comparison/README.md`에 정리했습니다. `reports/`는 Git에서 제외합니다.
+별도 state를 제외하고 RGB에는 기존 goal marker를 표시했습니다. 데모 50/200/1,013개와
+학습 update 수에 따른 성공률, 평가 불확실성, 재현 스크립트를 함께 보관합니다.
+Map은 시뮬레이터의 정확한 pose를 사용하므로 입력 정보의 차이까지 포함한 비교입니다.

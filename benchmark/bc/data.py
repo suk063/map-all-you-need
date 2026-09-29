@@ -61,7 +61,10 @@ def read_metadata(path, obs_mode, requested_control_mode=None):
     kwargs.pop("num_envs", None)
     kwargs.update(obs_mode=native_mode, control_mode=control_mode,
                   sim_backend=backend, reward_mode="dense")
-    return metadata, {"env_id": info["env_id"], "env_kwargs": kwargs}
+    config = {"env_id": info["env_id"], "env_kwargs": kwargs}
+    if info.get("show_goal", False):
+        config["show_goal"] = True
+    return metadata, config
 
 
 def observation_paths(spec):

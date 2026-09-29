@@ -15,6 +15,19 @@ OBS_MODES = ("state", "rgb", "rgbd", "dino", "map")
 DEFAULT_CONTROL_MODE = "pd_ee_delta_pose"
 
 
+class VisibleGoalWrapper(gym.Wrapper):
+    """Show existing goal markers to sensors; leave physics and collisions untouched."""
+
+    def reset(self, **kwargs):
+        _, info = self.env.reset(**kwargs)
+        base = self.unwrapped
+        goals = [actor for actor in base._hidden_objects if "goal" in actor.name]
+        for actor in goals:
+            actor.show_visual()
+        base._hidden_objects = [actor for actor in base._hidden_objects if "goal" not in actor.name]
+        return base.get_obs(info), info
+
+
 def shared_control_mode(mode):
     """ManiSkill 3.0.1 creates both robots with a shared controller name."""
     modes = list(mode.values()) if isinstance(mode, dict) else mode
@@ -59,6 +72,8 @@ def make_env(config, num_envs=1, evaluation=False, map_bank=None):
     env = gym.make(config["env_id"], **kwargs)
     if isinstance(env.unwrapped.single_action_space, gym.spaces.Dict):
         env = FlattenActionSpaceWrapper(env)
+    if config.get("show_goal", False):
+        env = VisibleGoalWrapper(env)
     mapper = None
     if "map" in config:
         from benchmark.common.mapping import MapObservationWrapper
