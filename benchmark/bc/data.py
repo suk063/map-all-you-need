@@ -14,7 +14,7 @@ from benchmark.common.envs import OBS_MODES, TASKS, shared_control_mode
 from benchmark.common.policy import at_path, prepare_observation
 
 
-def read_metadata(path, obs_mode):
+def read_metadata(path, obs_mode, requested_control_mode=None):
     path = Path(path)
     metadata_path = path.with_suffix(".json")
     if not path.is_file() or not metadata_path.is_file():
@@ -40,6 +40,12 @@ def read_metadata(path, obs_mode):
     if control_mode is None:
         raise ValueError("Demo metadata is missing control_mode")
     control_mode = shared_control_mode(control_mode)
+    if requested_control_mode is not None and requested_control_mode != control_mode:
+        raise ValueError(
+            f"Demo controller is {control_mode}, requested {requested_control_mode}. "
+            f"Use --control-mode {control_mode} to keep these actions, or replay the demo "
+            f"with --target-control-mode {requested_control_mode} before training."
+        )
     for episode in metadata["episodes"]:
         recorded_control = episode.get("control_mode", control_mode)
         if shared_control_mode(recorded_control) != control_mode:

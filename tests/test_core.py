@@ -171,6 +171,20 @@ def test_native_multi_robot_metadata(tmp_path):
         shared_control_mode(["pd_joint_pos", "pd_joint_delta_pos"])
 
 
+def test_bc_controller_selection_never_reinterprets_actions(tmp_path):
+    path, metadata, _, _, _ = demo_fixture(tmp_path)
+    assert read_metadata(path, "state", "pd_ee_delta_pose")[1]["env_kwargs"]["control_mode"] == "pd_ee_delta_pose"
+    # Absolute and delta pose have the same action dimension but different semantics.
+    with pytest.raises(ValueError, match="--target-control-mode pd_ee_pose"):
+        read_metadata(path, "state", "pd_ee_pose")
+    metadata["env_info"]["env_kwargs"]["control_mode"] = "pd_joint_delta_pos"
+    path.with_suffix(".json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="--control-mode pd_joint_delta_pos"):
+        read_metadata(path, "state", "pd_ee_delta_pose")
+    _, config = read_metadata(path, "state", "pd_joint_delta_pos")
+    assert config["env_kwargs"]["control_mode"] == "pd_joint_delta_pos"
+
+
 def test_rl_demo_preserves_unclipped_actions(tmp_path):
     path, metadata, spec, actions, _ = demo_fixture(tmp_path)
     with h5py.File(path, "a") as f:

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from benchmark.common.envs import (
+    DEFAULT_CONTROL_MODE,
     OBS_MODES,
     action_spec,
     env_config,
@@ -26,10 +27,13 @@ from benchmark.common.policy import (
 )
 from benchmark.common.utils import seed_everything, write_json
 
+JOINT_ONLY_TASKS = ("PickCubeSO100-v1", "PickCubeWidowXAI-v1")
+
 
 def environment_smoke(env_id):
     for mode in ("state", "rgb", "rgbd"):
-        config = env_config(env_id, mode)
+        controller = "pd_joint_delta_pos" if env_id in JOINT_ONLY_TASKS else DEFAULT_CONTROL_MODE
+        config = env_config(env_id, mode, controller)
         env = make_env(config, 2, evaluation=True)
         try:
             obs, _ = env.reset(seed=42)

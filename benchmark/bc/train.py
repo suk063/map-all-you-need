@@ -8,7 +8,13 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from benchmark.bc.data import DemoDataset, read_metadata
-from benchmark.common.envs import OBS_MODES, action_spec, make_env, resolved_config
+from benchmark.common.envs import (
+    DEFAULT_CONTROL_MODE,
+    OBS_MODES,
+    action_spec,
+    make_env,
+    resolved_config,
+)
 from benchmark.common.policy import (
     Policy,
     add_policy_arguments,
@@ -27,7 +33,7 @@ def train(args):
     options = policy_options(args)
     if args.batch_size is None:
         args.batch_size = 16 if args.obs_mode == "map" else 256
-    metadata, config = read_metadata(args.demo_path, args.obs_mode)
+    metadata, config = read_metadata(args.demo_path, args.obs_mode, args.control_mode)
     if args.obs_mode == "map":
         config["map"] = options["map_config"]
     env = make_env(config, evaluation=True)
@@ -91,6 +97,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo-path", required=True)
     parser.add_argument("--obs-mode", choices=OBS_MODES, default="state")
+    parser.add_argument("--control-mode", default=DEFAULT_CONTROL_MODE,
+                        help="Must match the demonstration controller (default: %(default)s)")
     add_policy_arguments(parser)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

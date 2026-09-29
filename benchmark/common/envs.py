@@ -12,6 +12,7 @@ TASKS = (
     "TwoRobotPickCube-v1", "TwoRobotStackCube-v1",
 )
 OBS_MODES = ("state", "rgb", "rgbd", "dino", "map")
+DEFAULT_CONTROL_MODE = "pd_ee_delta_pose"
 
 
 def shared_control_mode(mode):
@@ -26,7 +27,7 @@ def shared_control_mode(mode):
     return mode
 
 
-def env_config(env_id, obs_mode, control_mode="pd_joint_delta_pos"):
+def env_config(env_id, obs_mode, control_mode=DEFAULT_CONTROL_MODE):
     if env_id not in TASKS or obs_mode not in OBS_MODES:
         raise ValueError(f"Unsupported task/observation: {env_id}/{obs_mode}")
     return {"env_id": env_id, "env_kwargs": {

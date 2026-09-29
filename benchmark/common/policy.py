@@ -22,7 +22,8 @@ def add_policy_arguments(parser):
     parser.add_argument("--dino-source", help="Local DINOv3 checkout with hubconf.py")
     parser.add_argument("--dino-weights", help="Local S+/16 weights for dino, L/16 weights for map")
     parser.add_argument("--map-robot", choices=("full", "gripper"), default="full")
-    parser.add_argument("--map-background", choices=("table", "none"), default="table")
+    parser.add_argument("--map-background", choices=("table", "none"), default="none",
+                        help="Include tabletop points in the map (default: none)")
     parser.add_argument("--map-cache", default=".cache/maps")
     parser.add_argument("--map-views", type=int, default=96)
     parser.add_argument("--map-extra-views", type=int, default=512)

@@ -141,7 +141,7 @@ Reset에서 형상·재질이 달라지면 해당 구성요소만 새로 준비�
 | 옵션 | 기본값 | 동작 |
 |---|---|---|
 | `--map-robot full\|gripper` | `full` | 전체 robot 또는 손·손가락만 포함. 양팔은 양쪽 모두, panda_stick은 말단 도구 포함 |
-| `--map-background table\|none` | `table` | tabletop 윗면 포함 여부. 환경의 table/collision은 유지 |
+| `--map-background table\|none` | `none` | tabletop 윗면 포함 여부. 환경의 table/collision은 유지 |
 | `--map-views` | `96` | 구성요소별 기본 시점 수 |
 | `--map-extra-views` | `512` | 미관측 표면을 위한 최대 보충 시점 수 |
 
@@ -184,7 +184,13 @@ gamma 0.99, GAE lambda 0.95, PPO clip 0.2, 4 update epochs, minibatch 256입니�
 마지막 vector step 때문에 실제 transition 수는
 요청보다 최대 `num_envs - 1`만큼 많을 수 있으며 실제 값을 로그에 기록합니다.
 
-reward는 `dense`, controller는 `pd_joint_delta_pos`, robot과 episode 길이는 task 기본값입니다.
+reward는 `dense`, controller 기본값은 모든 입력 모드에서 `pd_ee_delta_pose`입니다.
+RL·BC 모두 `--control-mode`로 controller를 선택합니다. 예를 들어
+`--control-mode pd_joint_delta_pos` 또는 `--control-mode pd_ee_delta_pos`를 사용할 수 있습니다.
+Panda의 `pd_ee_delta_pose` action은 위치 변화량 3개, 회전 변화량 3개, gripper 1개입니다.
+Robot과 episode 길이는 task 기본값입니다.
+ManiSkill 3.0.1의 SO100·WidowXAI는 EE controller를 제공하지 않으므로,
+`PickCubeSO100-v1`·`PickCubeWidowXAI-v1`에서는 `--control-mode pd_joint_delta_pos`를 지정하세요.
 두 로봇에도 같은 controller를 적용하고 두 action을 하나의 벡터로 연결합니다.
 학습은 성공 직후 reset하지 않고 전체 horizon을 사용합니다. task 기본 reconfiguration 설정을 유지하므로
 YCB처럼 형상이 달라지는 환경도 전체 reset 때 객체를 다시 샘플링할 수 있습니다.
@@ -202,7 +208,7 @@ python -m benchmark.rl.train --help
 관측이 저장된 ManiSkill `.h5`와 같은 이름의 `.json`을 입력합니다.
 `obs[t] -> actions[t]`로 학습하고 각 trajectory의 마지막 관측은 제외합니다.
 영상은 sample별로 읽기 때문에 전체 이미지 데이터를 GPU/RAM에 올리지 않습니다.
-`--num-demos`는 JSON에 기록된 순서의 앞 N개 trajectory를 사용합니다.
+`--num-demos`를 생략하면 전체 데모를 사용하고, 지정하면 JSON 순서의 앞 N개 trajectory를 사용합니다.
 공식 RL demo의 action은 controller가 clip하기 전 값일 수 있습니다. BC는 저장된 action을
 그대로 MSE 학습하고, policy 실행 시 controller 범위로 clip합니다.
 
@@ -212,11 +218,11 @@ python -m benchmark.rl.train --help
 ```bash
 python -m mani_skill.utils.download_demo PickCube-v1 -o demos
 python -m mani_skill.trajectory.replay_trajectory \
-  --traj-path demos/PickCube-v1/rl/trajectory.none.pd_joint_delta_pos.physx_cuda.h5 \
+  --traj-path demos/PickCube-v1/rl/trajectory.none.pd_ee_delta_pose.physx_cuda.h5 \
   --obs-mode rgbd --use-env-states --save-traj --num-envs 1
 
 python -m benchmark.bc.train \
-  --demo-path demos/PickCube-v1/rl/trajectory.rgbd.pd_joint_delta_pos.physx_cuda.h5 \
+  --demo-path demos/PickCube-v1/rl/trajectory.rgbd.pd_ee_delta_pose.physx_cuda.h5 \
   --obs-mode rgbd --epochs 100 --batch-size 256 --seed 0
 ```
 
@@ -230,6 +236,9 @@ replay를 시험할 때는 `--count 2`를 추가할 수 있습니다. task마다
 자세한 방법은 [replay 문서](https://maniskill.readthedocs.io/en/latest/user_guide/datasets/replay.html)에 있습니다.
 
 BC는 JSON에서 task·robot·controller·backend·환경 kwargs를 복원합니다.
+선택한 `--control-mode`(기본 `pd_ee_delta_pose`)가 데모의 controller와 다르면 학습 전에 오류를 냅니다.
+다른 controller로 수집한 데모는 동일한 `--control-mode`를 지정하거나 공식 replay로 변환해야 합니다.
+Eval은 CLI 기본값과 관계없이 checkpoint에 저장된 controller를 복원합니다.
 기본 설정이 metadata에서 생략되었다면 고정된 ManiSkill 버전의 기본값을 사용하며,
 backend가 없는 구형 metadata는 공식 replay 규칙대로 CPU로 취급합니다.
 데모는 관측 모드와 action 차원이 일치해야 합니다. 원본 데이터는 자동으로 변환하지 않습니다.
@@ -322,3 +331,7 @@ DINO/map 추가 구현은 같은 RTX 4090 환경에서 **단위 테스트 40개,
 이는 초기 준비 시간을 제외한 smoke 실행 수치이며 Vulkan 메모리와 장시간 학습 성능을 나타내지 않습니다.
 실행 기록은 로컬 `runs/map-default-settings.json`, `runs/map-default-ppo/`, `runs/official-map-bc/`에 있습니다.
 전체 task의 기본 96+512 coverage, 장시간 수렴·성공률, 다른 GPU에서의 처리량은 검증하지 않았습니다.
+
+`pd_ee_delta_pose` 기본값과 BC controller 선택 추가 후 단위 테스트 41개,
+학습·평가 통합 테스트 10개, 16개 task의 state/RGB/RGBD reset·step 검사가 통과했습니다.
+SO100·WidowXAI 검사는 지원되는 `pd_joint_delta_pos`를 명시적으로 사용합니다.

@@ -9,6 +9,7 @@ from torch import nn
 from torch.distributions import Normal
 
 from benchmark.common.envs import (
+    DEFAULT_CONTROL_MODE,
     OBS_MODES,
     TASKS,
     action_spec,
@@ -183,7 +184,8 @@ def main():
     parser.add_argument("--entropy-coef", type=float, default=0.0)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--target-kl", type=float, default=0.03)
-    parser.add_argument("--control-mode", default="pd_joint_delta_pos")
+    parser.add_argument("--control-mode", default=DEFAULT_CONTROL_MODE,
+                        help="Robot controller (default: %(default)s)")
     parser.add_argument("--save-every", type=int, default=10, help="Checkpoint interval in PPO iterations")
     parser.add_argument("--output", help="New run directory (must not already exist)")
     train(parser.parse_args())

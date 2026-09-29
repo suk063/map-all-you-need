@@ -11,7 +11,13 @@ import torch
 
 from benchmark.bc.data import read_metadata
 from benchmark.bc.map_data import MapDemoDataset, read_state
-from benchmark.common.envs import action_spec, env_config, make_env, resolved_config
+from benchmark.common.envs import (
+    DEFAULT_CONTROL_MODE,
+    action_spec,
+    env_config,
+    make_env,
+    resolved_config,
+)
 from benchmark.common.policy import (
     Policy,
     add_policy_arguments,
@@ -21,7 +27,7 @@ from benchmark.common.policy import (
     save_policy,
 )
 from benchmark.common.utils import seed_everything, write_json
-from tests.smoke import create_test_demo
+from tests.smoke import JOINT_ONLY_TASKS, create_test_demo
 
 
 def map_demo_alignment(args):
@@ -68,7 +74,8 @@ def map_demo_alignment(args):
 
 def map_environment(args):
     options = policy_options(args)
-    config = env_config(args.env_id, "map")
+    controller = "pd_joint_delta_pos" if args.env_id in JOINT_ONLY_TASKS else DEFAULT_CONTROL_MODE
+    config = env_config(args.env_id, "map", controller)
     config["map"] = options["map_config"]
     config["env_kwargs"]["max_episode_steps"] = 2
     env = make_env(config, 2, evaluation=True)
