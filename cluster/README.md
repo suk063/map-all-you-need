@@ -98,9 +98,11 @@ Map cache는 `/mnt/map-all-you-need/<run-id>/cache/<task>/seed<seed>/`에 분리
 회수한 디렉터리의 `map-cache/`를 먼저 사용하므로 cluster 절대 경로 없이 평가할 수 있다.
 평가 자체에는 Linux/GPU 학습 의존성이 필요하다.
 
-State/map 기본 설정은 유지한다. RGB는 native state 물리 위에 64×64 RGB만 제공하며
+State/map 기본 설정은 유지한다. 최신 main의 task별 goal 표시 규칙을 세 입력에 공통 적용한다.
+RGB는 native state 물리와 원본 texture를 사용한 64×64 RGB만 제공하며
 actor/critic 각각 Brax CNN을 사용한다. 기본 env 128, eval env 8, batch 16,
 관측 정규화 비활성화이며 카메라 설정도 checkpoint metadata에 저장한다.
+검증 화면은 policy가 받는 `pixels/view_0`에서 직접 저장하며 별도 viewer 화면이 아니다.
 설정 파일 `train_args`에 benchmark CLI 옵션을 문자열 목록으로 지정하면
 환경 수·batch 등 명시적인 실험 설정을 변경할 수 있다.
 

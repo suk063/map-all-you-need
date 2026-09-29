@@ -5,6 +5,9 @@ training budgets; uniform native physics; Mac orchestration and bounded agent
 recovery; dedicated image; PVC checkpoints and portable downloads. Production
 training is not launched during implementation.
 
+Latest user updates: preserve main's task-specific goal visibility and DINO PCA
+viewer, enable native RGB textures, and merge the verified implementation into main.
+
 - [x] Inspect the PVC using a dedicated CPU login pod: writable, exact ViT-L/16 weights found.
 - [x] Add RGB observations without changing task dynamics.
 - [x] Add checkpoint continuation and portable map loading.
@@ -13,6 +16,8 @@ training is not launched during implementation.
 - [x] Mac Python 3.9 operational tests, manifest client dry-run, actual agent JSON decision,
   actual PVC → Mac transfer/checksum, shell syntax and Ruff.
 - [ ] Finish real A6000 environment, 30-combination learning and resume checks.
+- [ ] Verify textured RGB and task-specific goals after integrating current main.
+- [ ] Merge the verified implementation into main.
 
 The Mac has no Docker; the image has not been built/pushed. The temporary GPU pod
 uses the same pinned setup script as the Dockerfile. Production submission always

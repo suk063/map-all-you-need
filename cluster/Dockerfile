@@ -6,6 +6,7 @@ RUN bash /tmp/image-setup.sh && rm /tmp/image-setup.sh
 COPY benchmark ./benchmark
 COPY cluster ./cluster
 COPY tests ./tests
+COPY util ./util
 COPY pytest.ini ./
 ENV MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONUNBUFFERED=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics DINO_SOURCE=/opt/dinov3

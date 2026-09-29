@@ -17,6 +17,7 @@ from mujoco_playground.config import manipulation_params
 import benchmark  # noqa: F401  Set runtime defaults before importing MuJoCo/JAX.
 from benchmark.common.envs import (
     DEFAULT_TASK,
+    GOAL_TASKS,
     OBS_MODES,
     TASKS,
     env_config,
@@ -44,6 +45,7 @@ def test_native_configs_and_removed_modes(monkeypatch):
     assert OBS_MODES == ("state", "rgb", "map")
     for task in TASKS:
         config = env_config(task, "state")
+        assert config["goal_markers"] == "task"
         assert config["environment"] == manipulation.get_default_config(task).to_dict()
         assert ppo_config(config) == manipulation_params.brax_ppo_config(task, config["environment"].get("impl")).to_dict()
     for mode in ("rgbd", "dino"):
@@ -55,6 +57,7 @@ def test_native_configs_and_removed_modes(monkeypatch):
         assert rgb['environment'] == native['environment']
         assert not rgb['environment'].get('vision', False)
         assert rgb['rgb']['resolution'] == [64, 64]
+        assert rgb['rgb']['use_textures']
         expected = manipulation_params.brax_ppo_config(task, native['environment'].get('impl')).to_dict()
         expected.update(num_envs=128, num_eval_envs=8, batch_size=16, normalize_observations=False)
         expected['network_factory'] = manipulation_params.brax_vision_ppo_config(DEFAULT_TASK).network_factory.to_dict()
@@ -72,13 +75,23 @@ def test_native_configs_and_removed_modes(monkeypatch):
         parser().parse_args(['--map-background', 'table'])
     # Format-2 official Cartesian RGB must continue its old native vision path.
     rgb = env_config(DEFAULT_TASK, "rgb")
+    assert GOAL_TASKS == set(TASKS) - {'AlohaSinglePegInsertion', 'LeapCubeRotateZAxis', 'AeroCubeRotateZAxis'}
+    for mode in ('state', 'rgb', 'map'):
+        with pytest.raises(ValueError, match='different goal visibility'):
+            make_env({**env_config(DEFAULT_TASK, mode), 'goal_markers': False})
     del rgb['rgb']
     rgb['environment']['vision'] = True
+    rgb['goal_markers'] = False
     monkeypatch.setattr('benchmark.common.envs.registry.load', lambda name, config: config)
     monkeypatch.setattr('benchmark.common.envs.hide_goal_markers', lambda *a, **kw: None)
     restored = make_env(json.loads(json.dumps(rgb)), num_envs=3)
     assert restored.vision_config.cam_res == (64, 64)
     assert restored.vision_config.nworld == 3
+    assert restored.vision
+    monkeypatch.setattr('benchmark.common.envs.GoalVisibleCartesian', lambda config: config)
+    assert make_env({**rgb, 'goal_markers': 'task'}, num_envs=2).vision_config.nworld == 2
+    with pytest.raises(ValueError, match='different goal visibility'):
+        make_env({**rgb, 'goal_markers': True})
     params = ppo_config(env_config(DEFAULT_TASK, "map"))
     assert (params["num_envs"], params["batch_size"], params["normalize_observations"]) == (8, 1, False)
 
@@ -174,7 +187,7 @@ def test_background_selection_keeps_all_robot_and_articulated_parts():
     def selected(background, robot='full'):
         return {model.geom(g).name for _, geoms, _ in components(model, 'PandaOpenCabinet',
                                                                 {'background': background, 'robot': robot}) for g in geoms}
-    assert selected(False) == {'base', 'hand_visual', 'finger_visual', 'handle_visual', 'drawer_part'}
+    assert selected(False) == {'base', 'hand_visual', 'finger_visual', 'handle_visual', 'drawer_part', 'goal'}
     assert selected(True) == selected(False) | {'camera_housing', 'support'}
     assert selected(False, 'gripper') == selected(False) - {'base'}
     assert selected(True, 'gripper') == selected(True) - {'base'}
@@ -249,6 +262,7 @@ def test_articulated_parts_follow_forward_kinematics():
     mapper.local = jnp.array([[0, 0, 0], [.1, 0, 0], [.02, .01, 0]])
     mapper.body_ids = jnp.array([1, 2, 3])
     mapper.feature_ids = jnp.arange(3)
+    mapper.mocap_points = jnp.array([], dtype=jnp.int32)
     data = mujoco.MjData(model)
     for qpos, expected in (
         ([0, 0], [[1, 2, 3], [1.4, 2, 3], [1.52, 2.01, 3]]),
@@ -259,6 +273,29 @@ def test_articulated_parts_follow_forward_kinematics():
         poses = SimpleNamespace(xmat=jnp.asarray(data.xmat.reshape(-1, 3, 3)), xpos=jnp.asarray(data.xpos))
         out = mapper.observation(poses)["xyz"].reshape(-1, 3)
         np.testing.assert_allclose(out, expected, atol=1e-6)
+
+
+def test_goal_map_uses_current_mocap_pose_without_advancing_physics():
+    model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+      <body name="object"><geom size=".02"/></body>
+      <body name="mocap_target" mocap="true"><geom type="box" size=".02 .03 .04"/></body>
+    </worldbody></mujoco>''')
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    mapper = object.__new__(MapObservationWrapper)
+    mapper.local = jnp.array([[.02, 0, 0], [.02, 0, 0], [0, .03, 0]])
+    mapper.body_ids = jnp.array([1, 2, 2])
+    mapper.feature_ids = jnp.arange(3)
+    mapper.mocap_points = jnp.array([1, 2])
+    mapper.mocap_ids = jnp.array([0, 0])
+    # A native task can change mocap after stepping, leaving body transforms stale.
+    poses = SimpleNamespace(xpos=jnp.asarray(data.xpos), xmat=jnp.asarray(data.xmat.reshape(-1, 3, 3)),
+                            mocap_pos=jnp.array([[1., 2., 3.]]),
+                            mocap_quat=jnp.array([[np.sqrt(.5), 0, 0, np.sqrt(.5)]]))
+    xyz = mapper.observation(poses)['xyz'].reshape(-1, 3)
+    np.testing.assert_allclose(xyz, [[.02, 0, 0], [1, 2.02, 3], [.97, 2, 3]], atol=1e-6)
+    np.testing.assert_array_equal(poses.xpos, data.xpos)
+    np.testing.assert_array_equal(mapper.observation(poses)['feature_ids'], [0, 1, 2])
 
 
 @pytest.mark.integration

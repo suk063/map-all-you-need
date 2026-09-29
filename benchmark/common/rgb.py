@@ -22,7 +22,7 @@ def rgb_config(task):
         camera = 'benchmark_default'
     return {'backend': 'mjx_warp', 'camera': camera, 'resolution': [64, 64],
             'camera_source': 'scene_default' if camera == 'benchmark_default' else 'native',
-            'use_textures': False, 'use_shadows': False, 'enabled_geom_groups': [0, 1, 2]}
+            'use_textures': True, 'use_shadows': False, 'enabled_geom_groups': [0, 1, 2]}
 
 
 def render_model(env, settings):
@@ -97,6 +97,8 @@ class RGBObservationWrapper(Wrapper):
         self._hidden_mocap_ids = np.array([
             self._render_model.body_mocapid[i] for i in range(self._render_model.nbody)
             if self._render_model.body(i).name in GOAL_BODIES and self._render_model.body_mocapid[i] >= 0
+            and np.any(self._render_model.geom_bodyid == i)
+            and np.all(self._render_model.geom_group[self._render_model.geom_bodyid == i] == 5)
         ], dtype=np.int32)
         self._camera_id = self._render_model.camera(settings['camera']).id
         self.render_metadata.update(camera_id=self._camera_id,
