@@ -82,7 +82,7 @@ def load_policy(run_directory):
     metadata = json.loads((root / "config.json").read_text())
     if metadata.get("format_version") != 2:
         raise ValueError("Unsupported checkpoint format; retrain with MuJoCo Playground")
-    paths = sorted((p for p in (root / "checkpoints").iterdir() if p.is_dir() and p.name.isdigit()),
+    paths = sorted((p for p in (root / "checkpoints").glob("*") if p.is_dir() and p.name.isdigit()),
                    key=lambda p: int(p.name))
     if not paths:
         raise ValueError(f"No Brax checkpoint in {root}")
