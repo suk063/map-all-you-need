@@ -57,7 +57,15 @@ class Kube:
     def choose_gpu(self, exp):
         from cluster.gpu import pools
         nodes = json.loads(self.run('get', 'nodes', '-o', 'json'))['items']
-        pods = json.loads(self.run('get', 'pods', '--all-namespaces', '-o', 'json', timeout=60))['items']
+        try:
+            pod_data = self.run('get', 'pods', '--all-namespaces', '-o', 'json', timeout=60)
+        except RuntimeError as error:
+            if 'Forbidden' not in str(error):
+                raise
+            # Namespace-only accounts cannot see other tenants' reservations;
+            # availability is an estimate and Kubernetes makes the final placement.
+            pod_data = self.run('get', 'pods', '-o', 'json', timeout=60)
+        pods = json.loads(pod_data)['items']
         quotas = json.loads(self.run('get', 'resourcequota', '-o', 'json'))['items']
         options = pools(nodes, pods, quotas, self.cfg, exp['mode'])
         if not options:
