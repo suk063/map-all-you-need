@@ -17,6 +17,7 @@ from mujoco_playground.config import manipulation_params
 import benchmark  # noqa: F401  Set runtime defaults before importing MuJoCo/JAX.
 from benchmark.common.envs import (
     DEFAULT_TASK,
+    GOAL_TASKS,
     OBS_MODES,
     TASKS,
     env_config,
@@ -43,7 +44,7 @@ def test_native_configs_and_removed_modes(monkeypatch):
     assert OBS_MODES == ("state", "rgb", "map")
     for task in TASKS:
         config = env_config(task, "state")
-        assert config["goal_markers"] is True
+        assert config["goal_markers"] == "task"
         assert config["environment"] == manipulation.get_default_config(task).to_dict()
         assert ppo_config(config) == manipulation_params.brax_ppo_config(task, config["environment"].get("impl")).to_dict()
     for mode in ("rgbd", "dino"):
@@ -65,12 +66,14 @@ def test_native_configs_and_removed_modes(monkeypatch):
     rgb = env_config(DEFAULT_TASK, "rgb")
     assert rgb["environment"]["vision"]
     assert tuple(rgb["environment"]["vision_config"]["cam_res"]) == (64, 64)
-    monkeypatch.setattr('benchmark.common.envs.registry.load', lambda name, config: config)
+    assert GOAL_TASKS == set(TASKS) - {'AlohaSinglePegInsertion', 'LeapCubeRotateZAxis', 'AeroCubeRotateZAxis'}
+    monkeypatch.setattr('benchmark.common.envs.GoalVisibleCartesian', lambda config: config)
     restored = make_env(json.loads(json.dumps(rgb)), num_envs=3)
     assert restored.vision_config.cam_res == (64, 64)
     assert restored.vision_config.nworld == 3
-    with pytest.raises(ValueError, match='hides goal markers'):
-        make_env({**rgb, 'goal_markers': False})
+    for legacy in (False, True):
+        with pytest.raises(ValueError, match='different goal visibility'):
+            make_env({**rgb, 'goal_markers': legacy})
     params = ppo_config(env_config(DEFAULT_TASK, "map"))
     assert (params["num_envs"], params["batch_size"], params["normalize_observations"]) == (8, 1, False)
 

@@ -7,7 +7,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from benchmark.common.envs import TASKS, env_config, make_env
+from benchmark.common.envs import GOAL_BODIES, GOAL_TASKS, TASKS, env_config, make_env
 from benchmark.common.mapping import MapObservationWrapper, components
 from tests.test_integration import map_settings
 from util.view_scene import load_scene
@@ -21,6 +21,9 @@ def test_scene_selection_and_viewer(task):
     import viser
 
     model, data, reset = load_scene(task, seed=7)
+    goals = np.array([model.body(int(b)).name in GOAL_BODIES for b in model.geom_bodyid])
+    if task not in GOAL_TASKS:
+        assert np.all(model.geom_rgba[goals, 3] == 0)
     selections = [{g for _, geoms, _ in components(model, task, {'background': background}) for g in geoms}
                   for background in (False, True)]
     core, background = selections

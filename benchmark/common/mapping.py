@@ -16,7 +16,7 @@ import trimesh
 from mujoco.mjx._src.math import quat_to_mat
 from mujoco_playground._src.wrapper import Wrapper
 
-from benchmark.common.envs import GOAL_BODIES
+from benchmark.common.envs import GOAL_BODIES, GOAL_TASKS
 
 MAP_VERSION = 2
 IMAGE_SIZE = 256
@@ -74,8 +74,7 @@ def components(model, env_id, config):
         # Background selection must not bring excluded arm links or mounts back.
         if body in all_robot and body not in selected_robot:
             continue
-        # These native tasks park the unused goal at (-100, -100, -100).
-        if body in goals and env_id in ("LeapCubeRotateZAxis", "AeroCubeRotateZAxis"):
+        if body in goals and env_id not in GOAL_TASKS:
             continue
         material = int(model.geom_matid[geom])
         alpha = model.mat_rgba[material, 3] if material >= 0 else model.geom_rgba[geom, 3]
