@@ -48,9 +48,11 @@ Action은 task에 직접 전달합니다. 제어 방식·스케일·reward·epis
 예를 들어 `PandaPickCube`는 관절 위치 변화량, `PandaPickCubeCartesian`은 해당 task의
 3차원 Cartesian action, `PandaRobotiqPushCube`는 해당 task의 torque action을 사용합니다.
 성공이나 실패로 task가 종료되면 공식 wrapper가 reset합니다.
-모든 task에서 goal marker의 시각 형상을 숨기며 RGB와 map에도 넣지 않습니다.
-목표 pose·state 관측·reward·성공 판정·collision은 유지합니다.
-따라서 목표가 무작위로 바뀌는 task의 map 관측에는 목표 자체를 알려주는 정보가 없습니다.
+Goal marker의 형상·재질·표시 여부는 공식 task 설정을 그대로 유지합니다.
+Map에도 원본이 사용하는 goal marker를 포함하며 목표 pose·state 관측·reward·성공 판정·collision을 바꾸지 않습니다.
+원본에 marker가 없는 `AlohaSinglePegInsertion`에는 추가하지 않습니다.
+`LeapCubeRotateZAxis`와 `AeroCubeRotateZAxis`는 원본이 goal을 장면 밖으로 숨기므로 map에서도 제외합니다.
+`PandaPickCubeCartesian`의 RGB 모드도 원본처럼 goal을 목표 위치에 표시하지 않습니다.
 
 - **state**: 공식 관측과 MLP를 사용합니다. 손 task의 history·노이즈, 공식 privileged-state critic도 유지합니다.
 - **rgb**: 공식 vision 경로의 `pixels/view_0`, 64×64 RGB와 Brax CNN을 사용합니다.
@@ -76,7 +78,9 @@ Map은 **정확한 simulator pose와 visual geometry를 사용하는 관측**입
 관측되지 않은 점은 제외합니다. 점 수 제한으로 전체 map을 자르지는 않습니다.
 그다음에는 특징을 고정하고 MuJoCo의 forward kinematics로 계산된 body pose로 좌표만 갱신합니다.
 관절이 있는 로봇과 조작 대상은 body별 local map을 유지하므로 각 part가 독립적으로 움직입니다.
-한 body에 고정된 여러 geom은 같은 part로 취급합니다. Goal marker는 모든 task에서 제외합니다.
+한 body에 고정된 여러 geom은 같은 part로 취급합니다. Goal marker도 별도의 component로 포함합니다.
+원본이 사용하는 투명도·색상·texture를 유지하고, 현재 mocap 위치·회전을 읽어 map을 갱신합니다.
+Task가 물리 step 이후 goal을 갱신해도 바로 반영하며 simulator 상태나 RNG를 변경하지 않습니다.
 `--map-robot full`은 로봇 전체 visual part를, `gripper`는 조작부만 포함합니다.
 Panda는 hand와 양쪽 손가락, Robotiq은 gripper base와 모든 finger linkage,
 Aloha는 양쪽 gripper, Leap/Aero는 손바닥과 모든 손가락을 포함합니다.
@@ -87,13 +91,14 @@ Aloha는 양쪽 gripper, Leap/Aero는 손바닥과 모든 손가락을 포함합
 | 옵션 | 기본값 | 의미 |
 |---|---|---|
 | `--map-robot full\|gripper` | `full` | 로봇 전체 또는 물체 조작에 참여하는 손·gripper |
-| `--map-background true\|false` | `false` | Task와 무관한 scene object도 포함. 바닥·벽·goal은 항상 제외 |
+| `--map-background true\|false` | `false` | Task와 무관한 scene object도 포함. 바닥·벽은 항상 제외 |
 | `--map-cache` | `.cache/maps` | 구성요소별 HDF5 cache |
 | `--map-views` | `96` | 기본 시점 수 |
 | `--map-extra-views` | `512` | 최대 보충 시점 수 |
 
 바닥·벽·barrier와 모든 plane, collision proxy, site/tendon 보조 표시는 map에 넣지 않습니다.
 환경의 collision과 tendon 물리는 그대로 유지합니다.
+원본에서 표시하는 goal은 `map-background`와 `map-robot` 설정에 관계없이 포함합니다.
 
 로봇·조작 대상·goal 이외의 scene 구성은 다음과 같습니다.
 
@@ -180,6 +185,8 @@ Return·episode 길이와 task 지표의 누적값(`sum/`)·종료 시 값(`fina
 
 Map 실행 디렉터리가 참조하는 cache 파일도 보관해야 합니다. 다른 머신으로 옮길 때는
 기록된 cache 경로를 사용할 수 있어야 합니다. 평가에서 cache가 존재하면 DINO 가중치를 다시 읽지 않습니다.
+Goal을 제거했던 이전 실행(`goal_markers: false`)은 관측 구성이 다르므로 해당 실행의 저장된 소스로 평가하거나
+현재 설정으로 새로 학습해야 합니다. 기존 실행·cache 파일은 보존하며 변경 없는 component cache는 재사용합니다.
 기존 PyTorch `.pt` checkpoint, BC, `rgbd`, 독립 `dino` 모드와
 `--control-mode`, `--view`, `--state-input` 옵션은 지원하지 않습니다.
 
@@ -198,7 +205,7 @@ python -m util.view_scene --help
 
 출력된 `http://127.0.0.1:8080`을 열어 관절·actuator slider, camera, 재생/정지 기능을 사용할 수 있습니다.
 `--map-only`는 map에 들어갈 visual geometry를 보여주며 DINO cache를 만들지 않습니다.
-일반 scene 보기에는 바닥·벽도 보입니다. Goal marker는 두 보기 모두 숨깁니다.
+일반 scene 보기에는 바닥·벽도 보입니다. 두 보기 모두 공식 task가 표시하는 goal marker를 유지합니다.
 재생은 CPU MuJoCo에서 현재 actuator control을 유지하는 scene 검사이며, Playground의 action/reward loop나
 학습 policy 평가가 아닙니다. Reset은 최초의 task reset 상태를 복원합니다.
 원격 머신에서는 `ssh -L 8080:127.0.0.1:8080 <host>`로 접속할 수 있습니다.
@@ -219,7 +226,7 @@ python -m pytest -q -m integration
 통합 검사는 manipulation 전체의 native/map 물리 결과와 autoreset을 비교하고,
 세 모드의 짧은 PPO 학습·파라미터 갱신·checkpoint 복원·평가를 확인합니다.
 관절을 움직였을 때 body별 map과 geom의 좌표가 일치하는지 검사하며,
-goal marker의 물리 설정 보존과 RGB 비노출도 확인합니다.
+goal marker의 원본 형상·재질 보존, map에서의 mocap pose 갱신과 공식 RGB 관측의 일치도 확인합니다.
 MJX/Warp의 접촉 계산은 동일한 원본 환경의 반복 실행에서도 작은 수치 차이를 보이므로,
 물리 비교에는 관측한 GPU 오차 범위의 허용치를 사용합니다. 종료 결과와 RNG는 정확히 비교합니다.
 Map smoke test는 실행 시간을 줄이기 위해 4개 시점과 보충 시점 0개를 사용합니다.

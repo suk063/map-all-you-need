@@ -49,7 +49,8 @@ def test_scene_selection_and_viewer(task):
         assert {'base', 'left_follower', 'right_follower', 'box'} <= names
         assert {'link0', 'link7', 'fts300_body'}.isdisjoint(names)
     elif task.startswith('Panda'):
-        assert names == {'hand', 'left_finger', 'right_finger', 'handle' if task == 'PandaOpenCabinet' else 'box'}
+        assert names == {'hand', 'left_finger', 'right_finger', 'mocap_target',
+                         'handle' if task == 'PandaOpenCabinet' else 'box'}
     else:
         assert {'palm', 'cube'} <= names
         assert {'leap_mount', 'tetheria_mount'}.isdisjoint(names)

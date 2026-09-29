@@ -1,10 +1,7 @@
 """Official manipulation tasks and their unchanged environment/PPO defaults."""
 
-import numpy as np
 from ml_collections import ConfigDict
-from mujoco import mjx
 from mujoco_playground import manipulation, registry
-from mujoco_playground._src import mjx_env
 from mujoco_playground._src.wrapper import Wrapper
 from mujoco_playground.config import manipulation_params
 
@@ -35,7 +32,7 @@ def env_config(env_id=DEFAULT_TASK, obs_mode="state", impl=None):
         config.impl = impl
     if obs_mode == "rgb":
         config.vision = True
-    return {"env_id": env_id, "obs_mode": obs_mode, "goal_markers": False,
+    return {"env_id": env_id, "obs_mode": obs_mode, "goal_markers": True,
             "environment": config.to_dict()}
 
 
@@ -49,35 +46,19 @@ def ppo_config(config):
     return params
 
 
-def hide_goal_markers(env, vision=False):
-    """Hide native goal geoms without removing bodies, sensors, or collisions."""
-    model = env.mj_model
-    bodies = [body for body in range(model.nbody) if model.body(body).name in GOAL_BODIES]
-    geoms = np.isin(model.geom_bodyid, bodies)
-    if not geoms.any():
-        return
-    model.geom_group[geoms] = 5
-    model.geom_rgba[geoms, 3] = 0
-    model.geom_matid[geoms] = -1  # Shared materials must remain unchanged.
-    env._mjx_model = mjx_env.put_model(model, impl=env.mjx_model.impl.value)
-    if vision:
-        # The renderer bakes enabled geom groups into its context at creation.
-        env._rc = mjx.create_render_context(mjm=model, **env._config.vision_config.to_dict())
-        env._rc_pytree = env._rc.pytree()
-
-
 def make_env(config, num_envs=1):
     if num_envs < 1:
         raise ValueError("num_envs must be positive")
     # Validate saved configs too; there is no legacy backend/checkpoint adapter.
     env_config(config["env_id"], config["obs_mode"])
+    if config.get("goal_markers") is False:
+        raise ValueError("This run hides goal markers; use its saved source or retrain with native goals")
     values = config["environment"]
     if config["obs_mode"] == "rgb":
         # MuJoCo distinguishes a single (H, W) tuple from a list of per-camera sizes.
         values = {**values, "vision_config": {**values["vision_config"], "nworld": num_envs,
                   "cam_res": tuple(values["vision_config"]["cam_res"])}}
     env = registry.load(config["env_id"], config=ConfigDict(values))
-    hide_goal_markers(env, vision=config["obs_mode"] == "rgb")
     if config["obs_mode"] != "rgb" and hasattr(env, "defer_rendering"):
         env = NonVisionWrapper(env)
     if config["obs_mode"] == "map":

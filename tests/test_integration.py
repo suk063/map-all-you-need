@@ -8,7 +8,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import mujoco
-from mujoco import mjx
 import numpy as np
 import optax
 import pytest
@@ -46,22 +45,24 @@ def test_task_native_and_map_physics(task, monkeypatch):
     native = registry.load(task, config=ConfigDict(config['environment']))
     if hasattr(native, 'defer_rendering'):
         native = NonVisionWrapper(native)
-    hidden = make_env(config)
-    model_arrays = {name: getattr(hidden.mj_model, name).copy() for name in
+    base = make_env(config)
+    model_arrays = {name: getattr(base.mj_model, name).copy() for name in
                     ('qpos0', 'geom_pos', 'geom_quat', 'geom_rgba', 'geom_group', 'light_active')}
     torch_rng = torch.get_rng_state().clone()
-    mapper = MapObservationWrapper(hidden, task, map_settings())
+    mapper = MapObservationWrapper(base, task, map_settings())
     assert torch.equal(torch_rng, torch.get_rng_state())
     for name, value in model_arrays.items():
-        np.testing.assert_array_equal(getattr(hidden.mj_model, name), value)
+        np.testing.assert_array_equal(getattr(base.mj_model, name), value)
     assert len(mapper.feature_ids) > 0
     assert np.isfinite(mapper.local).all()
     assert not any(name.startswith("world/") for name in mapper.component_names) or task.startswith("Aloha")
-    assert not set(GOAL_BODIES).intersection(mapper.component_names)
+    expected_goal = (set() if task in ('AlohaSinglePegInsertion', 'LeapCubeRotateZAxis', 'AeroCubeRotateZAxis')
+                     else {'goal' if task == 'LeapCubeReorient' else 'mocap_target'})
+    assert set(GOAL_BODIES).intersection(mapper.component_names) == expected_goal
     # A cache hit must not instantiate DINO or write a new template.
     with monkeypatch.context() as patch:
         patch.setattr('benchmark.common.mapping.build_template', lambda *a, **kw: pytest.fail("Cache miss on identical model"))
-        cached = MapObservationWrapper(hidden, task, map_settings())
+        cached = MapObservationWrapper(base, task, map_settings())
         assert cached.bank.paths == mapper.bank.paths
         np.testing.assert_array_equal(cached.local, mapper.local)
     repeat = config["environment"]["action_repeat"]
@@ -73,6 +74,15 @@ def test_task_native_and_map_physics(task, monkeypatch):
     b = jax.jit(mapped.reset)(keys)
     np.testing.assert_array_equal(a.data.qpos, b.data.qpos)
     np.testing.assert_array_equal(a.info['rng'], b.info['rng'])
+    for name in expected_goal:
+        body = native.mj_model.body(name).id
+        mocap = native.mj_model.body_mocapid[body]
+        mask = np.asarray(mapper.body_ids) == body
+        assert mask.any()
+        local = np.asarray(mapper.local)[mask]
+        for i in range(2):
+            goal_xyz = local @ quat_matrix(np.asarray(a.data.mocap_quat[i, mocap])).T + np.asarray(a.data.mocap_pos[i, mocap])
+            np.testing.assert_allclose(np.asarray(b.obs['xyz']).reshape(2, -1, 3)[i, mask], goal_xyz, atol=1e-6)
     raw_step, map_step = jax.jit(raw.step), jax.jit(mapped.step)
     action = jnp.full((2, native.action_size), .05)
     for _ in range(5):
@@ -93,23 +103,20 @@ def test_task_native_and_map_physics(task, monkeypatch):
 
 
 @pytest.mark.parametrize("task", TASKS)
-def test_task_visual_parts_and_goal_removal(task):
+def test_task_visual_parts_and_native_goals(task):
     native = registry.load(task)
-    hidden = make_env(env_config(task))
-    original, model = native.mj_model, hidden.mj_model
-    # Only render fields change: even goal collision proxies retain their physics.
+    base = make_env(env_config(task))
+    original, model = native.mj_model, base.mj_model
+    # Preserve native rendering and physics, including translucent goal materials.
     for name in ('geom_contype', 'geom_conaffinity', 'body_mass', 'body_inertia',
-                 'geom_pos', 'geom_quat', 'geom_size', 'body_pos', 'qpos0', 'mat_rgba'):
+                 'geom_pos', 'geom_quat', 'geom_size', 'body_pos', 'qpos0', 'mat_rgba',
+                 'geom_group', 'geom_rgba', 'geom_matid'):
         np.testing.assert_array_equal(getattr(model, name), getattr(original, name))
-    goal = np.array([model.body(int(body)).name in GOAL_BODIES for body in model.geom_bodyid])
-    assert np.all(model.geom_group[goal] == 5)
-    assert np.all(model.geom_rgba[goal, 3] == 0)
-    assert np.all(model.geom_matid[goal] == -1)
-    for name in ('geom_group', 'geom_rgba', 'geom_matid'):
-        np.testing.assert_array_equal(getattr(model, name)[~goal], getattr(original, name)[~goal])
     groups = components(model, task, {'background': False})
     assert groups == components(original, task, {'background': False})
-    assert not any(model.body(body).name in GOAL_BODIES for body, _, _ in groups)
+    expected_goal = (set() if task in ('AlohaSinglePegInsertion', 'LeapCubeRotateZAxis', 'AeroCubeRotateZAxis')
+                     else {'goal' if task == 'LeapCubeReorient' else 'mocap_target'})
+    assert {model.body(body).name for body, _, _ in groups} & set(GOAL_BODIES) == expected_goal
     data = mujoco.MjData(model)
     if model.nkey:
         mujoco.mj_resetDataKeyframe(model, data, 0)
@@ -150,20 +157,15 @@ def test_native_rgb():
     assert pixels.shape == (2, 64, 64, 3)
     assert np.isfinite(pixels).all() and pixels.min() >= 0 and pixels.max() <= 1
     assert pixels.std() > 0
-    goal = native.mj_model.body('mocap_target').id
-    mocap = int(native.mj_model.body_mocapid[goal])
-
-    @jax.jit
-    def render_goal(position):
-        data = state.data.replace(mocap_pos=state.data.mocap_pos.at[:, mocap].set(position))
-        data = jax.vmap(lambda d: mjx.kinematics(native.mjx_model, d))(data)
-        return native.render_state(state.replace(data=data)).obs['pixels/view_0']
-
-    # Moving the hidden marker onto the visible cube must leave RGB unchanged.
-    cube = native.mj_model.body('box').id
-    near = render_goal(state.data.xpos[:, cube])
-    far = render_goal(jnp.full((2, 3), 100.))
-    np.testing.assert_array_equal(near, far)
+    config = ConfigDict(env_config(DEFAULT_TASK, 'rgb')['environment'])
+    config.vision_config.nworld = 2
+    original = registry.load(DEFAULT_TASK, config=config)
+    for name in ('geom_group', 'geom_rgba', 'geom_matid'):
+        np.testing.assert_array_equal(getattr(native.mj_model, name), getattr(original.mj_model, name))
+    official = wrapper.wrap_for_brax_training(original, episode_length=200, action_repeat=1)
+    expected = jax.jit(official.reset)(jax.random.split(jax.random.PRNGKey(0), 2))
+    expected = jax.jit(official.step)(expected, jnp.zeros((2, 3)))
+    np.testing.assert_array_equal(state.obs['pixels/view_0'], expected.obs['pixels/view_0'])
 
 
 @pytest.mark.parametrize('mode', ['state', 'rgb', 'map'])

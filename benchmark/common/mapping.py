@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 import trimesh
+from mujoco.mjx._src.math import quat_to_mat
 from mujoco_playground._src.wrapper import Wrapper
 
 from benchmark.common.envs import GOAL_BODIES
@@ -65,12 +66,16 @@ def components(model, env_id, config):
     all_robot = descendants(model, ROBOT_ROOTS[family])
     roots = ("base",) if env_id == "PandaRobotiqPushCube" else GRIPPER_ROOTS[family]
     selected_robot = all_robot if robot == "full" else descendants(model, roots)
-    required = selected_robot | descendants(model, TASK_OBJECTS[env_id])
+    goals = descendants(model, [name for name in GOAL_BODIES if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) >= 0])
+    required = selected_robot | descendants(model, TASK_OBJECTS[env_id]) | goals
     groups = {}
     for geom in range(model.ngeom):
         body = int(model.geom_bodyid[geom])
         # Background selection must not bring excluded arm links or mounts back.
         if body in all_robot and body not in selected_robot:
+            continue
+        # These native tasks park the unused goal at (-100, -100, -100).
+        if body in goals and env_id in ("LeapCubeRotateZAxis", "AeroCubeRotateZAxis"):
             continue
         material = int(model.geom_matid[geom])
         alpha = model.mat_rgba[material, 3] if material >= 0 else model.geom_rgba[geom, 3]
@@ -78,8 +83,6 @@ def components(model, env_id, config):
         if model.geom_group[geom] > 2 or alpha <= 0 or model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_PLANE:
             continue
         body_name = model.body(body).name
-        if body_name in GOAL_BODIES:
-            continue
         mesh_id = int(model.geom_dataid[geom])
         mesh_name = model.mesh(mesh_id).name if model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH else ""
         label = (model.geom(geom).name + " " + body_name + " " + mesh_name).lower()
@@ -378,6 +381,9 @@ class MapObservationWrapper(Wrapper):
         self.local = jnp.asarray(np.concatenate(local))
         self.feature_ids = jnp.asarray(np.concatenate(ids))
         self.body_ids = jnp.asarray(bodies)
+        mocap_ids = env.mj_model.body_mocapid[np.asarray(bodies)]
+        self.mocap_points = jnp.asarray(np.flatnonzero(mocap_ids >= 0))
+        self.mocap_ids = jnp.asarray(mocap_ids[mocap_ids >= 0])
 
     @property
     def observation_size(self):
@@ -387,6 +393,11 @@ class MapObservationWrapper(Wrapper):
     def observation(self, data):
         rotation = data.xmat[self.body_ids]
         position = data.xpos[self.body_ids]
+        if self.mocap_points.size:
+            # Native tasks can update a goal after physics; xpos/xmat then lag
+            # behind mocap. Read its current pose without advancing the simulator.
+            rotation = rotation.at[self.mocap_points].set(jax.vmap(quat_to_mat)(data.mocap_quat[self.mocap_ids]))
+            position = position.at[self.mocap_points].set(data.mocap_pos[self.mocap_ids])
         xyz = jnp.einsum("nij,nj->ni", rotation, self.local) + position
         # Flat leaves keep Brax's rollout/statistics batch axes consistent.
         return {"xyz": xyz.reshape(-1), "feature_ids": self.feature_ids}

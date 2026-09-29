@@ -46,7 +46,7 @@ def parser():
     p.add_argument("--map-robot", choices=("full", "gripper"), default="full",
                    help="Robot visual parts: whole robot or manipulation hand/gripper")
     p.add_argument("--map-background", choices=("true", "false"), default="false",
-                   help="Include task-unrelated scene objects; floors/walls/goals are always excluded")
+                   help="Include task-unrelated scene objects; floors/walls are always excluded")
     p.add_argument("--map-cache", default=".cache/maps")
     p.add_argument("--map-views", type=int, default=96)
     p.add_argument("--map-extra-views", type=int, default=512)
