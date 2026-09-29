@@ -89,18 +89,17 @@ def components(model, env_id, config):
         label = (model.geom(geom).name + " " + body_name + " " + mesh_name).lower()
         if any(word in label for word in ("floor", "ground", "wall", "barrier")):
             continue
-        tabletop = "tabletop" in label or label.strip() == "table"
         # Exclude the complete Aloha table from observations, even with
         # background enabled. Its physical geometry and rewards are unchanged.
-        if family == "Aloha" and (tabletop or "tablelegs" in label):
+        if family == "Aloha" and ("tabletop" in label or "tablelegs" in label or label.strip() == "table"):
             continue
         if body not in required and not config["background"]:
             continue
         # World geoms can be separate furniture pieces, not one giant object.
-        groups.setdefault((body, geom if body == 0 else -1, tabletop), []).append(geom)
+        groups.setdefault((body, geom if body == 0 else -1), []).append(geom)
     if not groups:
         raise ValueError(f"No map components selected for {env_id}")
-    return [(body, geoms, table) for (body, _, table), geoms in groups.items()]
+    return [(body, geoms) for (body, _), geoms in groups.items()]
 
 
 def quat_matrix(quat):
@@ -135,13 +134,10 @@ def visual_mesh(model, geoms):
     return trimesh.util.concatenate(meshes)
 
 
-def surface_points(mesh, spacing, tabletop=False):
+def surface_points(mesh, spacing):
     retained = {}
-    top = mesh.bounds[1, 2]
     for triangle, normal in zip(mesh.triangles, mesh.face_normals):
         if not np.isfinite(normal).all() or np.linalg.norm(normal) < .5:
-            continue
-        if tabletop and (normal[2] < .9 or triangle[:, 2].max() < top - .005):
             continue
         divisions = max(1, int(np.ceil(np.linalg.norm(np.roll(triangle, -1, axis=0) - triangle, axis=1).max() / spacing)))
         for i in range(divisions + 1):
@@ -163,10 +159,11 @@ def sphere_views(count):
     return np.column_stack((radius * np.cos(angle), radius * np.sin(angle), z))
 
 
-def appearance_key(model, geoms, mesh, config, tabletop):
+def appearance_key(model, geoms, mesh, config):
     digest = hashlib.sha256()
     settings = {key: config[key] for key in ("voxel_size", "views", "extra_views")}
-    settings.update(version=MAP_VERSION, mujoco=mujoco.__version__, tabletop=tabletop,
+    # Preserve existing full-surface cache hashes after removing tabletop mode.
+    settings.update(version=MAP_VERSION, mujoco=mujoco.__version__, tabletop=False,
                     dino_sha256=config["dino"]["sha256"], source_revision=config["dino"]["source_revision"],
                     image_size=IMAGE_SIZE, lighting="headlight_0.5_0.8_0", render_tendons=False)
     digest.update(json.dumps(settings, sort_keys=True).encode())
@@ -278,8 +275,8 @@ def observe(renderer, net, xyz, eye, target, device):
     return ids, samples[0, :, :, 0].T.cpu().numpy()
 
 
-def build_template(model, geoms, mesh, config, destination, net, device, tabletop=False):
-    xyz, normals = surface_points(mesh, config["voxel_size"], tabletop)
+def build_template(model, geoms, mesh, config, destination, net, device):
+    xyz, normals = surface_points(mesh, config["voxel_size"])
     sums, counts = np.zeros((len(xyz), 1024), np.float32), np.zeros(len(xyz), np.int32)
     renderer = IsolatedRenderer(model, geoms)
     start, used = time.monotonic(), 0
@@ -361,11 +358,12 @@ class MapObservationWrapper(Wrapper):
         self.frame_bodies = jnp.asarray([env.mj_model.body(name).id for name in frame['origin_bodies']])
         self.frame_axes = env.mj_model.body(frame['axes_body']).id
         self.component_names = []
+        self.component_sizes = []
         net = None
         try:
-            for body, geoms, table in components(env.mj_model, env_id, config):
+            for body, geoms in components(env.mj_model, env_id, config):
                 mesh = visual_mesh(env.mj_model, geoms)
-                key = appearance_key(env.mj_model, geoms, mesh, config, table)
+                key = appearance_key(env.mj_model, geoms, mesh, config)
                 path = Path(config["cache"]) / f"{key}.h5"
                 if not path.is_file():
                     if config.get("cache_read_only"):
@@ -377,7 +375,7 @@ class MapObservationWrapper(Wrapper):
                     if net is None:
                         with torch.random.fork_rng():
                             net = FrozenDINO(config["dino"]).to(device)
-                    build_template(env.mj_model, geoms, mesh, config, path, net, device, table)
+                    build_template(env.mj_model, geoms, mesh, config, path, net, device)
                 xyz, normal, features = self.bank.add(path)
                 local.append(xyz)
                 normals.append(normal)
@@ -388,6 +386,7 @@ class MapObservationWrapper(Wrapper):
                     geom = geoms[0]
                     name = f"world/{env.mj_model.geom(geom).name or 'geom'}:{geom}"
                 self.component_names.append(name)
+                self.component_sizes.append(len(xyz))
         finally:
             if net is not None:
                 del net

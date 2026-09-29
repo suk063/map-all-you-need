@@ -167,13 +167,11 @@ def test_map_networks_ignore_normalizer_and_have_separate_encoders(points):
                               critic['params']['MapEncoder_0']['input']['kernel'])
 
 
-def test_surface_voxels_and_tabletop():
+def test_surface_voxels_and_normals():
     mesh = trimesh.creation.box(extents=(.1, .1, .1))
-    xyz, _ = surface_points(mesh, .015)
+    xyz, normals = surface_points(mesh, .015)
     assert len(np.unique(np.floor(xyz / .015), axis=0)) == len(xyz)
-    xyz, normals = surface_points(mesh, .015, tabletop=True)
-    np.testing.assert_allclose(xyz[:, 2], .05)
-    assert (normals[:, 2] > .9).all()
+    np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1)
 
 
 def test_background_selection_keeps_all_robot_and_articulated_parts():
@@ -194,7 +192,7 @@ def test_background_selection_keeps_all_robot_and_articulated_parts():
       <body name="mocap_target" mocap="true"><geom name="goal" size=".01"/></body>
     </worldbody></mujoco>''')
     def selected(background, robot='full'):
-        return {model.geom(g).name for _, geoms, _ in components(model, 'PandaOpenCabinet',
+        return {model.geom(g).name for _, geoms in components(model, 'PandaOpenCabinet',
                                                                 {'background': background, 'robot': robot}) for g in geoms}
     assert selected(False) == {'base', 'hand_visual', 'finger_visual', 'handle_visual', 'drawer_part', 'goal'}
     assert selected(True) == selected(False) | {'camera_housing', 'support'}
@@ -226,7 +224,7 @@ def test_cache_key_tracks_appearance_and_extraction():
               'dino': {'sha256': 'weights-a', 'source_revision': 'source-a'}}
 
     def key(m=model, c=config):
-        return appearance_key(m, [0], visual_mesh(m, [0]), c, False)
+        return appearance_key(m, [0], visual_mesh(m, [0]), c)
 
     original = key()
     model.body_pos[1] += 1  # Runtime placement is intentionally independent of local maps.

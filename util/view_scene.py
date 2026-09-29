@@ -22,7 +22,7 @@ def load_scene(env_id, seed=0, map_only=False, background=False, robot="full", *
     initial = jax.device_get({name: getattr(state.data, name) for name in
                              ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat")})
     if map_only:
-        selected = [g for _, geoms, _ in components(model, env_id, {"robot": robot, "background": background}) for g in geoms]
+        selected = [g for _, geoms in components(model, env_id, {"robot": robot, "background": background}) for g in geoms]
         hidden = np.ones(model.ngeom, dtype=bool)
         hidden[selected] = False
         model.geom_rgba[hidden, 3] = 0

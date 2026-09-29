@@ -148,7 +148,7 @@ def test_task_visual_parts_and_goal_visibility(task):
     assert groups == components(original, task, {'background': False})
     expected_goal = (set() if task in ('AlohaSinglePegInsertion', 'LeapCubeRotateZAxis', 'AeroCubeRotateZAxis')
                      else {'goal' if task == 'LeapCubeReorient' else 'mocap_target'})
-    assert {model.body(body).name for body, _, _ in groups} & set(GOAL_BODIES) == expected_goal
+    assert {model.body(body).name for body, _ in groups} & set(GOAL_BODIES) == expected_goal
     data = mujoco.MjData(model)
     if model.nkey:
         mujoco.mj_resetDataKeyframe(model, data, 0)
@@ -161,11 +161,11 @@ def test_task_visual_parts_and_goal_visibility(task):
         if first is None:
             first = data.xpos.copy(), data.xmat.copy()
         else:
-            moved = {body for body, _, _ in groups if
+            moved = {body for body, _ in groups if
                      not np.allclose(data.xpos[body], first[0][body]) or
                      not np.allclose(data.xmat[body], first[1][body])}
         # Body-local map vertices must agree with independently transformed geom vertices.
-        for body, geoms, _ in groups:
+        for body, geoms in groups:
             for geom in geoms:
                 local = np.asarray(visual_mesh(model, [geom]).vertices)[::17]
                 geom_local = (local - model.geom_pos[geom]) @ quat_matrix(model.geom_quat[geom])

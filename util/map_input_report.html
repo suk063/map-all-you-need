@@ -38,10 +38,10 @@ const taskNames=[...new Set(report.variants.map(v=>v.task))], modes=[...new Set(
 for(const name of taskNames)$('task').add(new Option(name,name));
 for(const mode of modes)$('robot').add(new Option(mode==='full'?'full · 전체 로봇':'gripper · 조작부',mode));
 ['full','gripper'].forEach(mode=>{$(`${mode}-gallery`).hidden=!modes.includes(mode)});
-const settings=report.manifest.map_settings;
-const normalized=report.manifest.coordinate_frame==='normalized_robot';
+const settings=report.map_settings;
+const normalized=report.coordinate_frame==='normalized_robot';
 $('space').options[0].textContent=normalized?'3D geometry · normalized robot XYZ':'3D geometry · world XYZ';
-$('settings').textContent=`${taskNames.length} tasks · seed=${report.manifest.seed} · background=${settings.background} · voxel=${settings.voxel_size*100} cm · ${settings.views} 기본 시점 + 최대 ${settings.extra_views} 보충 시점 · 시각화용 추가 downsampling 없음`;
+$('settings').textContent=`${taskNames.length} tasks · seed=${report.seed} · background=${settings.background} · voxel=${settings.voxel_size*100} cm · ${settings.views} 기본 시점 + 최대 ${settings.extra_views} 보충 시점 · 시각화용 추가 downsampling 없음`;
 $('table-note').textContent='Aloha 상판·다리는 map 입력에서 제외되어 있습니다. 물리 테이블과 reward는 유지합니다.';
 let current, shown=[], revision=0;
 const camera={eye:{x:1.3,y:-1.8,z:1.05},up:{x:0,y:0,z:1}};
@@ -50,7 +50,7 @@ function buildParts(){
  $('parts').replaceChildren();
  current.parts.forEach((part,i)=>{
   const row=document.createElement('label');row.className='row';
-  const check=document.createElement('input');check.type='checkbox';check.checked=shown[i];check.dataset.index=i;
+  const check=document.createElement('input');check.type='checkbox';check.checked=shown[i];
   check.addEventListener('change',()=>{shown[i]=check.checked;Plotly.restyle('plot',{visible:check.checked},[i]);visibleCount()});
   const name=document.createElement('span');name.className='name';name.textContent=part.name;
   const category=document.createElement('small');category.textContent=part.category;category.style.color=categories[part.category];name.append(category);
@@ -70,8 +70,9 @@ async function draw(resetCamera=false){
   const coordinates=current[isXYZ&&isReset?'reset_xyz':space];
   $('pose-note').textContent=isReset?`실제 reset 입력. qpos 기반 MuJoCo FK와 body 위치 최대 차이 ${current.reset_body_pose_max_error_m.toFixed(3)} m (goal 제외).`:`실제 첫 step 입력 · action=0 · t=${current.step_time_seconds.toFixed(3)} s. reset 직후 입력과 비교할 수 있습니다.`;
   $('pose-note').style.color=isReset&&current.reset_body_pose_max_error_m>1e-4?'#b53b32':'#60738e';
+  let start=0;
   const traces=current.parts.map((part,i)=>{
-   const indices=[];current.part_ids.forEach((p,j)=>{if(p===i)indices.push(j)});
+   const indices=Array.from({length:part.points},(_,j)=>start+j);start+=part.points;
    return {type:'scatter3d',mode:'markers',name:part.name,visible:shown[i],showlegend:false,
     x:indices.map(j=>coordinates[j][0]),y:indices.map(j=>coordinates[j][1]),z:indices.map(j=>coordinates[j][2]),
     customdata:indices.map(j=>[j,current.feature_ids[j]]),

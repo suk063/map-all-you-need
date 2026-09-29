@@ -265,7 +265,7 @@ python -m util.export_map_inputs --output reports/map-input-pca --render-only
 Reset 직후와 zero action으로 첫 step을 수행한 실제 입력도 비교합니다.
 Native reset의 body pose와 qpos 기반 MuJoCo FK가 다르면 해당 오차를 표시하며,
 시각화에서 좌표를 임의로 보정하지 않습니다. PNG는 첫 step 이후 관측을 보여줍니다.
-`all_tasks_full.png`, `all_tasks_gripper.png`, task별 PNG/NPZ와 구성요소·cache 경로를 기록한
+`all_tasks_full.png`, `all_tasks_gripper.png`, task별 PNG/NPZ와 구성요소별 점 수를 기록한
 `manifest.json`도 저장합니다. 좌표는 현재 mocap pose, robot frame, episode별 정규화를 반영하는 실제 map observation이며,
 NPZ에는 normal, 정규화 중심·스케일과 `geometry_epsilon`도 함께 저장합니다.
 색상은 학습 projection 이전의 frozen DINO 1024차원 특징을 task/모드별 PCA로 변환한 값입니다.

@@ -24,7 +24,7 @@ def test_scene_selection_and_viewer(task):
     goals = np.array([model.body(int(b)).name in GOAL_BODIES for b in model.geom_bodyid])
     if task not in GOAL_TASKS:
         assert np.all(model.geom_rgba[goals, 3] == 0)
-    selections = [{g for _, geoms, _ in components(model, task, {'background': background}) for g in geoms}
+    selections = [{g for _, geoms in components(model, task, {'background': background}) for g in geoms}
                   for background in (False, True)]
     core, background = selections
     assert core <= background
@@ -39,8 +39,8 @@ def test_scene_selection_and_viewer(task):
         assert {model.geom(g).name for g in background - core} == {'pad', 'camera_tracking_box'}
     else:
         assert core == background
-    gripper = {g for _, geoms, _ in components(model, task, {'background': False, 'robot': 'gripper'}) for g in geoms}
-    gripper_bg = {g for _, geoms, _ in components(model, task, {'background': True, 'robot': 'gripper'}) for g in geoms}
+    gripper = {g for _, geoms in components(model, task, {'background': False, 'robot': 'gripper'}) for g in geoms}
+    gripper_bg = {g for _, geoms in components(model, task, {'background': True, 'robot': 'gripper'}) for g in geoms}
     assert gripper < core
     assert gripper_bg - gripper == background - core
     names = {model.body(int(model.geom_bodyid[g])).name for g in gripper}
@@ -83,7 +83,7 @@ def test_background_cache_and_map_view(task, monkeypatch):
         cached = MapObservationWrapper(env, task, config)
         assert mapped.bank.paths == cached.bank.paths
     model, data, _ = load_scene(task, map_only=True, background=True, robot='gripper')
-    selected = {g for _, geoms, _ in components(env.mj_model, task, config) for g in geoms}
+    selected = {g for _, geoms in components(env.mj_model, task, config) for g in geoms}
     visible = set(np.flatnonzero(model.geom_rgba[:, 3] > 0))
     assert visible == selected
     np.testing.assert_array_equal(model.geom_contype, env.mj_model.geom_contype)

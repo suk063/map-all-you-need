@@ -26,7 +26,7 @@ def render_report(output):
             payload.append({**variant, "xyz": arrays["xyz"].round(6).tolist(),
                             "reset_xyz": arrays["reset_xyz"].round(6).tolist(),
                             "scores": arrays["scores"].round(6).tolist(), "colors": arrays["colors"].tolist(),
-                            "feature_ids": arrays["feature_ids"].tolist(), "part_ids": arrays["part_ids"].tolist()})
+                            "feature_ids": arrays["feature_ids"].tolist()})
 
     def draw(ax, item, individual=False):
         xyz = np.array(item["xyz"])
@@ -68,7 +68,7 @@ def render_report(output):
         fig.savefig(output / f"all_tasks_{mode}.png", dpi=160)
         plt.close(fig)
     template = Path(__file__).with_name("map_input_report.html").read_text()
-    data = json.dumps({"manifest": manifest, "variants": payload}, separators=(",", ":")).replace("</", "<\\/")
+    data = json.dumps({**manifest, "variants": payload}, separators=(",", ":")).replace("</", "<\\/")
     html = template.replace("/*__PLOTLY__*/", get_plotlyjs()).replace("/*__DATA__*/", data)
     (output / "index.html").write_text(html)
     print(f"Rendered {len(payload)} input clouds, contact sheets, and offline HTML", flush=True)
